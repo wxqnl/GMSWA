@@ -1,0 +1,17 @@
+{
+  "suite_name": "sanity_real_v1_nogitnoise",
+  "description": "Sanity suite over real benchmark tasks.",
+  "runs": [
+    {
+      "run_name": "babilong_sanity",
+      "kind": "harness",
+      "task_group": "persistent",
+      "tasks": [
+        "babilong_qa1"
+      ],
+      "metadata": {
+        "max_seq_lengths": "0k"
+      }
+    }
+  ]
+}

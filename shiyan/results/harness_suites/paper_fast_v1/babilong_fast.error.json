@@ -1,0 +1,6 @@
+{
+  "suite_name": "paper_fast_v1",
+  "run_name": "babilong_fast",
+  "task_group": "persistent",
+  "error": "BuilderConfig '0k,4k,16k,32k' not found. Available: ['0k', '128k', '16k', '1k', '2k', '32k', '4k', '64k', '8k']"
+}

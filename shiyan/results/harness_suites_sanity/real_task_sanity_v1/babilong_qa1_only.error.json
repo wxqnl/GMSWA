@@ -1,0 +1,6 @@
+{
+  "suite_name": "real_task_sanity_v1",
+  "run_name": "babilong_qa1_only",
+  "task_group": "persistent",
+  "error": "'tuple' object does not support item assignment"
+}

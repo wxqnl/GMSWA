@@ -1,0 +1,11 @@
+suite_name,run_name,task_group,task_name,metric_name,metric_value,n_samples,alias
+sanity_real_v1,babilong_sanity,persistent,babilong_qa1,name,babilong_qa1,"{'original': 1000, 'effective': 1}",
+sanity_real_v1,babilong_sanity,persistent,babilong_qa1,alias,babilong_qa1,"{'original': 1000, 'effective': 1}",
+sanity_real_v1,babilong_sanity,persistent,babilong_qa1,sample_len,1,"{'original': 1000, 'effective': 1}",
+sanity_real_v1,babilong_sanity,persistent,babilong_qa1,"acc,none",0.0,"{'original': 1000, 'effective': 1}",
+sanity_real_v1,babilong_sanity,persistent,babilong_qa1,"acc_stderr,none",N/A,"{'original': 1000, 'effective': 1}",
+sanity_real_v1,longbench2_sanity,persistent,longbench2_agent_history,name,longbench2_agent_history,"{'original': 20, 'effective': 1}",
+sanity_real_v1,longbench2_sanity,persistent,longbench2_agent_history,alias,longbench2_agent_history,"{'original': 20, 'effective': 1}",
+sanity_real_v1,longbench2_sanity,persistent,longbench2_agent_history,sample_len,1,"{'original': 20, 'effective': 1}",
+sanity_real_v1,longbench2_sanity,persistent,longbench2_agent_history,"acc,none",0.0,"{'original': 20, 'effective': 1}",
+sanity_real_v1,longbench2_sanity,persistent,longbench2_agent_history,"acc_stderr,none",N/A,"{'original': 20, 'effective': 1}",

@@ -1,0 +1,49 @@
+# test file
+test.py
+
+# data files
+data
+
+# docs
+docs/_build
+
+# intermediate files
+build
+dist
+*.egg-info
+dist-packages/*
+
+# experimental results
+exp
+results
+wandb
+*.csv
+*.png
+*.html
+
+# log and config files
+log.*
+*.log
+*.cfg
+*.ini
+
+# pycache
+__pycache__
+.pytest_cache/
+
+# saved model
+*.pkl
+*.pt
+*.safetensors
+*.whl
+flame/saves/
+flame/logs/
+flame/lm-evaluation-harness/build/
+tmp_*.py
+
+
+# vscode
+.vscode
+
+# macOS
+.DS_Store

@@ -1,0 +1,60 @@
+{
+  "suite_name": "paper_fast_v1",
+  "description": "Real-data fast iteration suite using official lm-eval task definitions for RULER, BABILong, and LongBench v2.",
+  "source_notes": [
+    "RULER tasks are provided by the local lm-evaluation-harness task registry and reference the NVIDIA RULER benchmark.",
+    "BABILong tasks are provided by the local lm-evaluation-harness task registry and use the RMT-team/babilong-1k-samples dataset.",
+    "LongBench v2 tasks are provided by the local lm-evaluation-harness task registry and use the longbench2 task definitions already vendored in this repository."
+  ],
+  "runs": [
+    {
+      "run_name": "ruler_fast",
+      "kind": "harness",
+      "task_group": "retrieval",
+      "tasks": [
+        "niah_single_1",
+        "niah_single_2",
+        "niah_multikey_2",
+        "niah_multiquery",
+        "ruler_vt",
+        "ruler_cwe"
+      ],
+      "metadata": {
+        "max_seq_lengths": [
+          4096,
+          8192,
+          16384
+        ],
+        "num_samples": 100
+      }
+    },
+    {
+      "run_name": "babilong_fast",
+      "kind": "harness",
+      "task_group": "persistent",
+      "tasks": [
+        "babilong_qa1",
+        "babilong_qa2",
+        "babilong_qa3",
+        "babilong_qa4",
+        "babilong_qa5"
+      ],
+      "metadata": {
+        "max_seq_lengths": "0k,4k,16k,32k"
+      }
+    },
+    {
+      "run_name": "longbench2_fast",
+      "kind": "harness",
+      "task_group": "persistent",
+      "tasks": [
+        "longbench2_agent_history",
+        "longbench2_dialogue_history",
+        "longbench2_user_guide",
+        "longbench2_many_shot",
+        "longbench2_code",
+        "longbench2_table"
+      ]
+    }
+  ]
+}

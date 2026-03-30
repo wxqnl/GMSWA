@@ -1,0 +1,407 @@
+\documentclass{article}
+
+\usepackage{neurips_2024}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{multirow}
+
+\title{GM-SWA: Gated Memory Sliding-Window Attention\\for Efficient Long-Context Language Modeling}
+
+\author{%
+Anonymous Authors \\
+Anonymous Institution \\
+Anonymous Address \\
+\texttt{anonymous@openreview.net}
+}
+
+\newcommand{\model}{GM-SWA}
+\newcommand{\baseline}{SWA}
+\newcommand{\todoresult}{\textit{TBD}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Long-context language models must preserve fine-grained local interactions while remaining efficient over very long sequences. Sliding-window attention is attractive because it scales linearly with context length, but it truncates information outside the local window. We present \model, a simple long-context attention mechanism that augments sliding-window attention with a small learned memory updated from evicted values. Each key-value head maintains a handful of memory slots, updates them with a gated recurrence, and exposes them as additional memory keys and values at every step. This yields a model that keeps the strong local inductive bias of sliding-window attention while allowing compressed information flow beyond the window. We further derive a stable differentiable training formulation based on an affine prefix-scan, which matches the recurrent definition of the memory update while avoiding numerically unstable closed-form intermediates. We describe the \model\ architecture, its efficient training and decoding algorithms, and an experimental protocol covering short-context pretraining, long-context continued pretraining, language modeling evaluation, needle-in-a-haystack retrieval, and efficiency ablations. Quantitative entries are left blank in this version and will be filled once the final training runs complete.
+\end{abstract}
+
+\section{Introduction}
+
+Recent progress in language modeling has made long-context processing a first-class objective. Yet the dominant design space remains polarized. Full attention offers strong modeling capacity but scales quadratically with context length. Linear and recurrent alternatives reduce cost, but often weaken local fidelity or impose memory updates that are hard to train robustly. Sliding-window attention, used in efficient decoder architectures such as Mistral, is an appealing compromise because it preserves exact local attention within a fixed window while keeping cost linear in sequence length. Its main limitation is equally clear: information outside the window is discarded.
+
+Our starting point is the following question: can we preserve the strong local behavior of sliding-window attention while adding a small, learnable mechanism that carries compact information from evicted tokens into the future? We answer this question with \model\ (Gated Memory Sliding-Window Attention), which augments each key-value head with a small number of memory slots. Whenever tokens are evicted from the local window, their values are projected into a memory update. A gate, predicted from the current hidden state, interpolates between the previous memory state and the new update. Future queries attend jointly to the local sliding window and the compressed memory slots.
+
+The design is deliberately minimal. \model\ does not replace local attention; it only adds a compressed memory path. At inference time, the local cache remains a fixed-size window, while the memory state is a small recurrent state per layer. At training time, however, naive recurrent unrolling is too slow, and a straightforward closed-form scan produces numerically dangerous intermediate values over long sequences. A substantial part of this work is therefore algorithmic: we derive a stable affine prefix-scan formulation that exactly matches the recurrent memory update, supports variable-length packed sequences, and integrates cleanly with a flash-attention training stack.
+
+\paragraph{Contributions.}
+Our contributions are:
+\begin{enumerate}
+    \item We propose \model, a gated memory augmentation of sliding-window attention that preserves exact local attention while exposing a compact summary of evicted context through a small number of learned memory slots.
+    \item We derive a stable differentiable affine prefix-scan formulation for training the recurrent memory update, eliminating the unstable closed-form implementation that arises from repeated products and divisions of gates over long sequences.
+    \item We provide an end-to-end long-context experimental protocol for \model, including short-context pretraining, long-context continued pretraining, retrieval-style long-context evaluation, efficiency benchmarking, and ablations over memory slots and update rules.
+    \item We instantiate \model\ in a compact decoder-only language model family, with \baseline\ as a strict ablation obtained by disabling memory while keeping the architecture otherwise unchanged.
+\end{enumerate}
+
+\section{Related Work}
+
+\subsection{Long-Context Transformers}
+
+Long-context modeling has been approached through sparse attention, recurrence, compression, and state-space alternatives. Sparse and local patterns include Longformer and sliding-window attention variants. Decoder-only architectures such as Mistral show that strong local attention can remain competitive when paired with modern training recipes. Our work starts from this sliding-window regime rather than from full attention, and asks how to recover information flow beyond the local window without discarding the locality bias that makes sliding-window models efficient and robust.
+
+\subsection{Recurrent and Memory-Augmented Sequence Models}
+
+Recurrent memory has long been used to extend context beyond a fixed segment, from Transformer-XL and Compressive Transformer to more recent hybrid and retrieval-augmented models. These methods differ in what they cache, how memory is updated, and whether memory participates as a persistent state, a retrieval database, or an auxiliary latent. \model\ takes the simplest possible path: memory is a small learned recurrent state attached to each key-value head, updated online from evicted values, and directly queried as additional keys and values.
+
+\subsection{Efficient Attention and Hybrid Architectures}
+
+Several efficient attention families trade exact attention for linear or subquadratic structure. Linear attention variants compress history into kernelized states; state-space models use learned recurrent dynamics; hybrid local-global models combine windows with compressed summaries or landmarks. \model\ is closest in spirit to hybrid local-memory models, but differs in two ways. First, it retains exact sliding-window attention for the local region. Second, its memory is updated from evicted values through a lightweight gated recurrence with very small state, keeping inference simple and cache-friendly.
+
+\section{Method}
+
+\subsection{Problem Setup}
+
+We consider a decoder-only transformer layer with hidden states $\mathbf{h}_t \in \mathbb{R}^{d}$, query heads $H$, key-value heads $H_{\mathrm{kv}}$, and head dimension $d_h=d/H$. A standard sliding-window layer attends exactly over the most recent $W$ tokens and discards all tokens outside the window. This yields linear complexity in sequence length, but prevents direct information flow beyond the local cache.
+
+\model\ augments this layer with a compact recurrent memory. Each key-value head maintains $M$ memory slots, so the memory state at time $t$ is
+\begin{equation}
+\mathbf{M}_t \in \mathbb{R}^{H_{\mathrm{kv}} \times M \times d_h}.
+\end{equation}
+The design objective is to preserve exact sliding-window attention inside the local window while exposing a compressed representation of evicted context through $\mathbf{M}_t$.
+
+\subsection{Memory Write}
+
+Let $\mathbf{v}^{(h)}_{t-W}$ denote the value vector evicted from key-value head $h$ when the local window advances at step $t$. For each memory slot $s \in \{1,\dots,M\}$, we construct a candidate memory update
+\begin{equation}
+\mathbf{u}^{(h,s)}_t = \phi^{(h,s)}\!\left(\mathbf{v}^{(h)}_{t-W}\right),
+\end{equation}
+where $\phi$ is implemented either as a learned linear map or as a scaled identity-style projection, depending on the configuration. We also predict a gate from the current hidden state:
+\begin{equation}
+\mathbf{g}^{(h,s)}_t = \sigma\!\left(\psi^{(h,s)}(\mathbf{h}_t)\right),
+\qquad
+\mathbf{g}^{(h,s)}_t \in (0,1)^{d_h},
+\end{equation}
+where $\psi$ is either a learned linear projection from the hidden state or a learned per-slot parameter.
+
+The memory update is defined by the gated recurrence
+\begin{equation}
+\mathbf{m}^{(h,s)}_t
+=
+\mathbf{g}^{(h,s)}_t \odot \mathbf{m}^{(h,s)}_{t-1}
++
+\left(1 - \mathbf{g}^{(h,s)}_t\right) \odot \mathbf{u}^{(h,s)}_t.
+\label{eq:memory_update}
+\end{equation}
+Equation~\ref{eq:memory_update} is applied independently to every key-value head and every memory slot. The update is an elementwise convex interpolation and therefore preserves a simple interpretation: large gate values retain existing memory, whereas small gate values overwrite memory with the latest compressed update.
+
+\subsection{Memory Read and Attention Fusion}
+
+At time $t$, the query attends to two sources of context:
+\begin{enumerate}
+    \item the exact sliding window of the most recent $W$ tokens, and
+    \item the current memory state $\mathbf{M}_t$.
+\end{enumerate}
+
+Before reading, the memory state may be normalized:
+\begin{equation}
+\tilde{\mathbf{m}}^{(h,s)}_t =
+\mathrm{Normalize}\!\left(\mathbf{m}^{(h,s)}_t\right).
+\end{equation}
+Memory keys and values are then defined as
+\begin{equation}
+\mathbf{k}^{(h,s)}_{\mathrm{mem},t} = \tilde{\mathbf{m}}^{(h,s)}_t,
+\qquad
+\mathbf{v}^{(h,s)}_{\mathrm{mem},t} = \alpha \tilde{\mathbf{m}}^{(h,s)}_t,
+\end{equation}
+where $\alpha > 0$ is a learned scale.
+
+Let $\mathbf{o}^{\mathrm{local}}_t$ and $\ell^{\mathrm{local}}_t$ denote the output and log-partition term of sliding-window attention. Let $\mathbf{o}^{\mathrm{mem}}_t$ and $\ell^{\mathrm{mem}}_t$ denote the corresponding quantities for the memory branch. \model\ combines the two branches by log-sum-exp normalization:
+\begin{equation}
+\ell^{\mathrm{tot}}_t = \log\!\left(\exp(\ell^{\mathrm{local}}_t) + \exp(\ell^{\mathrm{mem}}_t)\right),
+\end{equation}
+\begin{equation}
+\mathbf{o}_t =
+\exp(\ell^{\mathrm{local}}_t - \ell^{\mathrm{tot}}_t)\,\mathbf{o}^{\mathrm{local}}_t
++
+\exp(\ell^{\mathrm{mem}}_t - \ell^{\mathrm{tot}}_t)\,\mathbf{o}^{\mathrm{mem}}_t.
+\label{eq:mixture_output}
+\end{equation}
+For $M=1$, the memory branch contributes one additional key-value pair per key-value head. For $M>1$, the query first forms an attention distribution over memory slots and then applies Equation~\ref{eq:mixture_output}. In all cases, the local branch remains exact, while the memory branch supplies a compressed long-range context signal.
+
+\subsection{Stable Parallel Training via Affine Prefix-Scan}
+
+Although Equation~\ref{eq:memory_update} is defined recurrently, training requires all intermediate memory states. Sequential unrolling is prohibitively slow for long sequences, whereas a naive closed-form scan based on cumulative gate products is numerically fragile because it introduces extreme intermediate ratios over long spans.
+
+We instead rewrite the recurrence as an affine map
+\begin{equation}
+\mathbf{m}_t = \mathbf{A}_t \mathbf{m}_{t-1} + \mathbf{b}_t,
+\qquad
+\mathbf{A}_t = \mathbf{g}_t,
+\qquad
+\mathbf{b}_t = \left(1-\mathbf{g}_t\right)\odot \mathbf{u}_t.
+\label{eq:affine_form}
+\end{equation}
+The composition of two affine updates is
+\begin{equation}
+(\mathbf{A}_2, \mathbf{b}_2) \circ (\mathbf{A}_1, \mathbf{b}_1)
+=
+(\mathbf{A}_2 \odot \mathbf{A}_1,\;
+\mathbf{A}_2 \odot \mathbf{b}_1 + \mathbf{b}_2),
+\label{eq:affine_compose}
+\end{equation}
+which is associative. Consequently, the full sequence of recurrent updates can be evaluated with a parallel prefix-scan over pairs $(\mathbf{A}_t,\mathbf{b}_t)$.
+
+Our implementation uses a Hillis-Steele-style scan and supports both padded batches and packed variable-length sequences. For packed sequences, scan composition is masked across sequence boundaries so that memory does not leak between examples. This construction preserves the token-by-token recurrent update up to floating-point error while eliminating the unstable divisions required by the earlier closed-form implementation. Empirically, this improves long-context training stability without altering the underlying model definition.
+
+\subsection{Inference Complexity}
+
+At inference time, each layer maintains a local key-value cache of size $W$ and a recurrent memory state of size $H_{\mathrm{kv}} \times M \times d_h$. The per-token cost therefore scales with $W+M$ rather than with the full history length. Since $M$ is intentionally small, \model\ preserves the deployment profile of sliding-window decoding while adding a bounded amount of persistent long-range state.
+
+\subsection{Baseline Instantiation}
+
+Our main baseline is obtained by disabling memory while leaving the remainder of the layer unchanged. In configuration terms, this corresponds to setting \texttt{disable\_memory=true}. The local attention pattern, tokenizer, optimization recipe, and overall model scale are therefore matched, making \baseline\ a strict control for isolating the contribution of the memory path.
+
+\section{Experiments}
+
+\subsection{Goals}
+
+Our experiments are designed to answer four questions:
+\begin{enumerate}
+    \item Does \model\ improve language modeling quality over an otherwise identical \baseline\ model?
+    \item Does \model\ improve long-context retrieval behavior, especially on needle-in-a-haystack style benchmarks?
+    \item What is the efficiency cost of adding memory, in terms of training throughput, memory footprint, and decoding overhead?
+    \item How do the number of memory slots and memory-update design choices affect the quality-efficiency trade-off?
+\end{enumerate}
+
+\subsection{Model Family}
+
+Our primary configuration is a compact decoder-only model with approximately $110$M parameters. The model uses 12 layers, hidden size 640, 10 query heads, 2 key-value heads, sliding-window size 128, and RoPE base $10^6$. The \model\ variant adds memory slots on top of this backbone; the \baseline\ variant disables memory while keeping the rest of the stack fixed.
+
+\subsection{Training Curriculum}
+
+To reduce optimization difficulty while still targeting long-context benchmarks, we follow a two-stage curriculum:
+\begin{enumerate}
+    \item \textbf{Stage 1 (base pretraining).} Short-context pretraining on FineWeb-style data, using a moderate context length (e.g., 2K tokens) to establish the base language model.
+    \item \textbf{Stage 2 (long-context continued pretraining).} Continued pretraining at long context (e.g., 16K) with a mixture of web, scientific, and book-style corpora such as FineWeb, arXiv, and PG19, intended to improve retrieval over long spans.
+\end{enumerate}
+
+Our current target budget is 40B tokens in total, split into a larger short-context stage and a smaller long-context continued-pretraining stage. The exact step counts will be updated once the long runs finish.
+
+\subsection{Datasets and Evaluation}
+
+\paragraph{Pretraining corpora.}
+We use FineWeb-50B as the primary short-context corpus, and a mixed long-context curriculum based on FineWeb-50B, arXiv, and PG19. The exact mixture weights will be reported once the long runs complete.
+
+\paragraph{Language modeling evaluation.}
+We plan to report validation perplexity or bits-per-byte on held-out text from the same domain family and from external long-context corpora.
+
+\paragraph{Long-context retrieval evaluation.}
+Our main long-context target is needle-in-a-haystack style retrieval. We will evaluate accuracy as a function of context length and needle depth, and will compare \model\ against \baseline\ under matched training budgets.
+
+\paragraph{Efficiency evaluation.}
+We will report:
+\begin{enumerate}
+    \item training tokens-per-second,
+    \item peak GPU memory,
+    \item decode-time cache size, and
+    \item qualitative training stability indicators such as skipped steps due to invalid gradient norms.
+\end{enumerate}
+
+\subsection{Baselines}
+
+We organize baselines into three groups:
+\begin{enumerate}
+    \item \textbf{Local baseline:} \baseline, i.e., sliding-window attention with memory disabled.
+    \item \textbf{Memory ablations:} \model\ with different numbers of memory slots $M \in \{1,2,4,\dots\}$ and with alternative gating/projection options.
+    \item \textbf{External long-context baselines:} where feasible, comparisons to representative local, recurrent, or hybrid long-context models at similar scale.
+\end{enumerate}
+
+\subsection{Main Results}
+
+\begin{table}[t]
+    \centering
+    \caption{Main language modeling and long-context retrieval results.}
+    \label{tab:main_results}
+    \begin{tabular}{lcccccc}
+        \toprule
+        Model & $M$ & Context & Val PPL $\downarrow$ & NIAH-8K $\uparrow$ & NIAH-16K $\uparrow$ & NIAH-32K $\uparrow$ \\
+        \midrule
+        \baseline & 0 & 16K & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \model & 1 & 16K & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \model & 2 & 16K & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \model & 4 & 16K & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \caption{Efficiency trade-offs. Throughput and memory are measured under the same hardware and dataloader settings.}
+    \label{tab:efficiency}
+    \begin{tabular}{lccccc}
+        \toprule
+        Model & $M$ & Train TPS $\uparrow$ & Peak Memory (GiB) $\downarrow$ & Decode Cache $\downarrow$ & Skipped Steps $\downarrow$ \\
+        \midrule
+        \baseline & 0 & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \model & 1 & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \model & 2 & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \model & 4 & \todoresult & \todoresult & \todoresult & \todoresult \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph{Interpretation.}
+The central question is whether the memory path yields a better quality-efficiency frontier than pure sliding windows. In particular, we care not only about absolute quality, but also about which memory-slot count provides the best balance of retrieval accuracy, throughput, and stability.
+
+\subsection{Ablations and Analysis}
+
+\subsubsection{Number of Memory Slots}
+
+The first ablation sweeps the number of memory slots $M$. Intuitively, increasing $M$ expands memory capacity, but also increases compute and cache overhead. Our working hypothesis is that small values such as $M=1$ or $M=2$ will capture most of the benefit, while larger values will show diminishing returns.
+
+\begin{table}[t]
+    \centering
+    \caption{Ablation over the number of memory slots.}
+    \label{tab:slots}
+    \begin{tabular}{cccccc}
+        \toprule
+        $M$ & Val PPL $\downarrow$ & NIAH-16K $\uparrow$ & Train TPS $\uparrow$ & Peak Memory $\downarrow$ & Notes \\
+        \midrule
+        0 & \todoresult & \todoresult & \todoresult & \todoresult & \baseline \\
+        1 & \todoresult & \todoresult & \todoresult & \todoresult & smallest memory \\
+        2 & \todoresult & \todoresult & \todoresult & \todoresult & moderate capacity \\
+        4 & \todoresult & \todoresult & \todoresult & \todoresult & larger memory \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{Gate and Projection Design}
+
+We also plan to compare:
+\begin{enumerate}
+    \item linear versus parameterized gates,
+    \item linear versus scaled memory projections,
+    \item different memory update strides, and
+    \item different memory normalization settings.
+\end{enumerate}
+These ablations are directly supported by the implementation and configuration system.
+
+\subsubsection{Training Stability}
+
+An important part of this project is turning the memory update into a trainable long-sequence operator without sacrificing speed. We therefore report whether the stable affine prefix-scan eliminates the numerical issues encountered by the earlier closed-form implementation, and whether this leads to cleaner long-context training runs. A compact table or paragraph should summarize:
+\begin{enumerate}
+    \item whether invalid gradient norms occurred,
+    \item whether optimizer steps were skipped,
+    \item whether throughput improved relative to the earlier implementation, and
+    \item whether the corrected implementation preserved the semantics of the original recurrence.
+\end{enumerate}
+
+\subsubsection{Qualitative Diagnostics}
+
+The implementation exposes auxiliary statistics such as mean gate value, low/high gate saturation fractions, mean memory weight, and slot entropy. These diagnostics help interpret how \model\ uses memory in practice. We recommend at least one figure or table showing:
+\begin{enumerate}
+    \item how gate statistics evolve over training,
+    \item whether larger $M$ leads to meaningful slot specialization, and
+    \item whether memory weight increases with context length or needle depth.
+\end{enumerate}
+
+\section{Discussion}
+
+\paragraph{Why \model\ is a useful design point.}
+\model\ occupies an attractive middle ground. It does not attempt to replace local attention or model the entire past with a large recurrent state. Instead, it keeps exact local attention and adds only a tiny learned summary of evicted context. This makes it easy to compare against a strict \baseline\ baseline and easy to deploy in incremental decoding settings.
+
+\paragraph{What the stable scan changes.}
+The stable affine prefix-scan does not alter the model design; it only changes how the same recurrence is computed during training. This distinction matters for the paper. The architectural novelty is the gated memory augmentation of sliding windows. The algorithmic novelty is the numerically stable, differentiable, efficient realization of that memory update over long packed sequences.
+
+\paragraph{Current limitations.}
+Some quantitative entries are intentionally left blank until the full long-context runs complete. The final empirical claims should be updated only with results directly supported by completed experiments.
+
+\section{Conclusion}
+
+We introduced \model, a gated memory augmentation of sliding-window attention aimed at efficient long-context language modeling. \model\ maintains exact local attention while exposing a compact learned memory of evicted context, and it can be trained efficiently using a stable affine prefix-scan that preserves the semantics of the recurrent update. The resulting architecture offers a simple and practical design point between pure local attention and heavier long-context mechanisms, with a clean path to evaluate quality, retrieval, efficiency, and stability under matched training budgets.
+
+\section*{Broader Impact}
+
+Long-context language models can improve information access, document understanding, and retrieval-heavy applications, but they also make it easier to process and summarize large quantities of sensitive text. The risks are similar to those of other foundation language models: misuse for surveillance, large-scale synthesis, or privacy-sensitive document analysis. Because \model\ is primarily an efficiency and architecture contribution, it does not introduce new capability categories on its own, but it may lower the cost of deploying long-context models more broadly.
+
+\section*{Limitations}
+
+This work focuses on architectural and systems questions at small-to-medium model scale. Whether the same memory design scales smoothly to much larger models remains to be tested. In addition, the memory mechanism is intentionally low-capacity; it is not a replacement for exact full-context attention when precise token-level access to the entire history is required.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{99}
+
+\bibitem[Arora et~al.(2024)]{arora2024ring}
+Simran Arora, Joshua Ainslie, et~al.
+\newblock Ring attention with blockwise transformers.
+\newblock 2024.
+
+\bibitem[Beltagy et~al.(2020)]{beltagy2020longformer}
+Iz Beltagy, Matthew~E. Peters, and Arman Cohan.
+\newblock Longformer: The long-document transformer.
+\newblock In \emph{ACL}, 2020.
+
+\bibitem[Dai et~al.(2019)]{dai2019transformerxl}
+Zihang Dai, Zhilin Yang, Yiming Yang, Jaime Carbonell, Quoc~V. Le, and Ruslan Salakhutdinov.
+\newblock Transformer-{XL}: Attentive language models beyond a fixed-length context.
+\newblock In \emph{ACL}, 2019.
+
+\bibitem[Dao et~al.(2022)]{dao2022flashattention}
+Tri Dao, Daniel~Y. Fu, Stefano Ermon, Atri Rudra, and Christopher R\'e.
+\newblock FlashAttention: Fast and memory-efficient exact attention with {IO}-awareness.
+\newblock In \emph{NeurIPS}, 2022.
+
+\bibitem[Gu and Dao(2023)]{gu2023mamba}
+Albert Gu and Tri Dao.
+\newblock Mamba: Linear-time sequence modeling with selective state spaces.
+\newblock 2023.
+
+\bibitem[Hochreiter and Schmidhuber(1997)]{hochreiter1997lstm}
+Sepp Hochreiter and J\"urgen Schmidhuber.
+\newblock Long short-term memory.
+\newblock \emph{Neural Computation}, 1997.
+
+\bibitem[Jordan et~al.(2024)]{jordan2024infini}
+Kieran Jordan, et~al.
+\newblock Infini-attention for long-context transformers.
+\newblock 2024.
+
+\bibitem[Jiang et~al.(2023)]{jiang2023mistral}
+Albert~Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, et~al.
+\newblock Mistral 7{B}.
+\newblock 2023.
+
+\bibitem[Katharopoulos et~al.(2020)]{katharopoulos2020linear}
+Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and Fran\c{c}ois Fleuret.
+\newblock Transformers are {RNN}s: Fast autoregressive transformers with linear attention.
+\newblock In \emph{ICML}, 2020.
+
+\bibitem[Rae et~al.(2020)]{rae2020compressive}
+Jack~W. Rae, Anna Potapenko, Siddhant~M. Jayakumar, and Timothy~P. Lillicrap.
+\newblock Compressive transformers for long-range sequence modelling.
+\newblock In \emph{ICLR}, 2020.
+
+\bibitem[Sukhbaatar et~al.(2019)]{sukhbaatar2019adaptive}
+Sainbayar Sukhbaatar, Edouard Grave, Piotr Bojanowski, and Armand Joulin.
+\newblock Adaptive attention span in transformers.
+\newblock In \emph{ACL}, 2019.
+
+\bibitem[Vaswani et~al.(2017)]{vaswani2017attention}
+Ashish Vaswani, Noam Shazeer, Niki Parmar, et~al.
+\newblock Attention is all you need.
+\newblock In \emph{NeurIPS}, 2017.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,6 @@
+suite_name,run_name,task_group,task_name,metric_name,metric_value,n_samples,alias
+babilong_multilen_sanity_v1,babilong_multilen,persistent,babilong_qa1,name,babilong_qa1,"{'original': 2000, 'effective': 1}",
+babilong_multilen_sanity_v1,babilong_multilen,persistent,babilong_qa1,alias,babilong_qa1,"{'original': 2000, 'effective': 1}",
+babilong_multilen_sanity_v1,babilong_multilen,persistent,babilong_qa1,sample_len,1,"{'original': 2000, 'effective': 1}",
+babilong_multilen_sanity_v1,babilong_multilen,persistent,babilong_qa1,"acc,none",0.0,"{'original': 2000, 'effective': 1}",
+babilong_multilen_sanity_v1,babilong_multilen,persistent,babilong_qa1,"acc_stderr,none",N/A,"{'original': 2000, 'effective': 1}",

@@ -1,0 +1,3 @@
+task_group,model_name,mean_accuracy,mean_score,mean_margin,mean_retention,count
+persistent,GMswa-40B-stage1,1.0,-5.055555555555555,0.649572649572649,,2
+retrieval,GMswa-40B-stage1,0.5,-3.48125,0.069318181818181,,2

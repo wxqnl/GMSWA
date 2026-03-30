@@ -1,0 +1,5 @@
+task_group,model_name,condition,mean_score,mean_delta_vs_none,count
+persistent,GMswa-40B-stage1,memory_only,-5.185049019607844,0.0,2
+persistent,GMswa-40B-stage1,none,-5.185049019607844,0.0,2
+persistent,GMswa-40B-stage1,original,-5.024509803921569,0.16053921568627402,2
+persistent,GMswa-40B-stage1,summary_only,-5.185049019607844,0.0,2

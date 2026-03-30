@@ -1,0 +1,51 @@
+{
+  "suite_name": "mechanism_real_v1",
+  "description": "Real-data mechanism suite aligned with the paper's retrieval-vs-persistent framing.",
+  "source_notes": [
+    "Retrieval-oriented tasks are chosen from RULER and LongBench retrieval-style tasks.",
+    "Persistent-oriented tasks are chosen from BABILong and LongBench v2 history/in-context reasoning tasks.",
+    "This suite is intended for mechanism analysis and ablations, not just headline benchmark reporting."
+  ],
+  "runs": [
+    {
+      "run_name": "retrieval_real",
+      "kind": "harness",
+      "task_group": "retrieval",
+      "tasks": [
+        "niah_single_1",
+        "niah_single_2",
+        "niah_single_3",
+        "niah_multikey_1",
+        "niah_multikey_2",
+        "niah_multikey_3",
+        "longbench_passage_retrieval_en"
+      ],
+      "metadata": {
+        "max_seq_lengths": [
+          4096,
+          8192,
+          16384,
+          32768
+        ]
+      }
+    },
+    {
+      "run_name": "persistent_real",
+      "kind": "harness",
+      "task_group": "persistent",
+      "tasks": [
+        "babilong_qa11",
+        "babilong_qa14",
+        "babilong_qa15",
+        "longbench2_agent_history",
+        "longbench2_dialogue_history",
+        "longbench2_user_guide",
+        "longbench2_many_shot",
+        "longbench2_event_order"
+      ],
+      "metadata": {
+        "max_seq_lengths": "0k"
+      }
+    }
+  ]
+}

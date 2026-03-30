@@ -1,0 +1,17 @@
+{
+  "suite_name": "babilong_multilen_sanity_v1",
+  "description": "Verify multi-length BABILong metadata handling.",
+  "runs": [
+    {
+      "run_name": "babilong_multilen",
+      "kind": "harness",
+      "task_group": "persistent",
+      "tasks": [
+        "babilong_qa1"
+      ],
+      "metadata": {
+        "max_seq_lengths": "0k,4k"
+      }
+    }
+  ]
+}
