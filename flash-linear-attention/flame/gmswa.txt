@@ -53,7 +53,7 @@ bash train.sh \
   --training.seed 0 \
   --checkpoint.interval 1500 \
   --metrics.log_freq 1 \
-  --checkpoint.folder /home/minko/newswa/planC/flash-linear-attention/flame/saves/test/checkpoint \
+  --checkpoint.folder /home/minko/newswa/planC/flash-linear-attention/flame/saves/KV-GMSWA-2-100M-stage1/test/checkpoint \
   --training.num_workers 2 \
   --training.prefetch_factor 1 \
   --checkpoint.export_dtype bfloat16 \
@@ -62,4 +62,5 @@ bash train.sh \
   --training.data_parallel_shard_degree 2 \
   --activation_checkpoint.mode none \
   --training.streaming \
-  --training.varlen 
+  --training.varlen \
+  --metrics.enable_wandb

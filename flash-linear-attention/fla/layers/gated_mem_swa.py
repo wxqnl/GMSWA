@@ -53,7 +53,10 @@ class GatedMemSWA(nn.Module):
         qkv_bias: bool = True,
         rope_theta: float = 10000.0,
         max_position_embeddings: int | None = None,
-        num_mem_slots: int = 1,
+        num_mem_slots: int | None = None,
+        num_memory_components: int | None = None,
+        use_memory_component: bool | None = None,
+        memory_state_rank: int | None = None,
         mem_scale: float = 1.0,
         mem_rank: int | None = None,
         mem_proj_mode: str = "linear",
@@ -68,12 +71,28 @@ class GatedMemSWA(nn.Module):
         layer_idx: int | None = None,
     ) -> None:
         super().__init__()
+        explicit_num_memory_components = num_memory_components
+        explicit_num_mem_slots = num_mem_slots
+        if num_memory_components is None:
+            num_memory_components = 1 if num_mem_slots is None else num_mem_slots
+        elif num_mem_slots is not None and num_mem_slots != num_memory_components:
+            raise ValueError("`num_mem_slots` and `num_memory_components` must match when both are provided.")
+        if use_memory_component is None:
+            use_memory_component = num_memory_components > 0
+        elif (
+            not use_memory_component
+            and explicit_num_memory_components not in {0, None}
+            and explicit_num_mem_slots not in {0, None}
+        ):
+            raise ValueError("`use_memory_component=False` is incompatible with a positive memory component count.")
+        if not use_memory_component:
+            num_memory_components = 0
         if dim % num_heads != 0:
             raise ValueError(f"dim must be divisible by num_heads, got dim={dim}, num_heads={num_heads}")
         if window_size is None:
             raise ValueError("window_size must be set for GatedMemSWA")
-        if num_mem_slots < 0:
-            raise ValueError("num_mem_slots must be >= 0")
+        if num_memory_components < 0:
+            raise ValueError("num_memory_components must be >= 0")
 
         self.dim = dim
         self.num_heads = num_heads
@@ -86,8 +105,16 @@ class GatedMemSWA(nn.Module):
         self.window_size = window_size
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
-        self.num_mem_slots = num_mem_slots
-        self.gate_num_slots = 1 if num_mem_slots > 1 else num_mem_slots
+        self.num_memory_components = num_memory_components
+        self.use_memory_component = use_memory_component
+        # Keep legacy aliases for checkpoint/config compatibility.
+        self.num_mem_slots = self.num_memory_components
+        self.structured_memory_enabled = False
+        self.memory_state_rank = int(memory_state_rank) if memory_state_rank is not None else 1
+        self.decoupled_memory_component = self.num_memory_components == 1
+        self.memory_state_rows = 2 if self.decoupled_memory_component else self.num_memory_components
+        self.gate_num_components = 1 if self.num_memory_components > 1 else self.num_memory_components
+        self.gate_num_slots = self.gate_num_components
         self.mem_rank = mem_rank
         self.mem_proj_mode = mem_proj_mode
         self.mem_gate_mode = mem_gate_mode
@@ -95,10 +122,10 @@ class GatedMemSWA(nn.Module):
         self.mem_update_stride = mem_update_stride
         self.mem_token_threshold = mem_token_threshold
         self.disable_memory = disable_memory
-        self.memory_enabled = (not disable_memory) and num_mem_slots > 0
+        self.memory_enabled = (not disable_memory) and self.num_memory_components > 0
         self.gate_bias_init = float(gate_bias_init)
         self.gate_clamp_eps = 1e-4
-        self.multi_slot_log_prior = math.log(self.num_mem_slots) if self.num_mem_slots > 1 else 0.0
+        self.multi_slot_log_prior = math.log(self.num_memory_components) if self.num_memory_components > 1 else 0.0
         self.mem_scale_init = float(mem_scale)
 
         mem_scale = float(mem_scale)
@@ -114,8 +141,13 @@ class GatedMemSWA(nn.Module):
             raise ValueError("mem_update_stride must be >= 1")
         if mem_rank is not None and mem_rank <= 0:
             raise ValueError("mem_rank must be > 0 when provided.")
+        if memory_state_rank is not None and memory_state_rank <= 0:
+            raise ValueError("memory_state_rank must be > 0 when provided.")
 
         self.log_mem_scale = nn.Parameter(torch.log(torch.tensor([mem_scale])))
+        self.mem_read_beta = nn.Parameter(torch.tensor([1.0])) if self.decoupled_memory_component else None
+        self.mem_read_bias = nn.Parameter(torch.tensor([-1.0])) if self.decoupled_memory_component else None
+        self.single_component_gate_logit_offset = None
         self.mem_norm = mem_norm
         self.mem_norm_eps = mem_norm_eps
 
@@ -123,15 +155,21 @@ class GatedMemSWA(nn.Module):
         self.k_proj = nn.Linear(dim, self.num_kv_heads * self.head_dim, bias=qkv_bias)
         self.v_proj = nn.Linear(dim, self.num_kv_heads * self.head_dim, bias=qkv_bias)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, dim, bias=False)
+        self.mem_key_proj = nn.Linear(self.head_dim, self.head_dim, bias=False) if self.decoupled_memory_component else None
+
+        self.mem_write_proj = None
+        self.mem_read_proj = None
+        self.mem_read_gate = None
+        self.memory_band_logit_bias = None
 
         if self.memory_enabled and self.mem_gate_mode == "linear":
-            self.gate_net = nn.Linear(dim, self.num_kv_heads * self.gate_num_slots, bias=True)
+            self.gate_net = nn.Linear(dim, self.num_kv_heads * self.gate_num_components, bias=True)
             nn.init.constant_(self.gate_net.bias, gate_bias_init)
             self.gate_param = None
         elif self.memory_enabled:
             self.gate_net = None
             self.gate_param = nn.Parameter(
-                torch.full((self.num_kv_heads, self.gate_num_slots), float(gate_bias_init))
+                torch.full((self.num_kv_heads, self.gate_num_components), float(gate_bias_init))
             )
         else:
             self.gate_net = None
@@ -139,19 +177,19 @@ class GatedMemSWA(nn.Module):
 
         if self.memory_enabled and self.mem_proj_mode == "linear":
             if self.mem_rank is None:
-                self.mem_proj = nn.Linear(self.head_dim, self.head_dim * self.num_mem_slots, bias=False)
+                self.mem_proj = nn.Linear(self.head_dim, self.head_dim * self.num_memory_components, bias=False)
                 self.mem_proj_in = None
                 self.mem_proj_out = None
             else:
                 self.mem_proj = None
                 self.mem_proj_in = nn.Linear(self.head_dim, self.mem_rank, bias=False)
-                self.mem_proj_out = nn.Linear(self.mem_rank, self.head_dim * self.num_mem_slots, bias=False)
+                self.mem_proj_out = nn.Linear(self.mem_rank, self.head_dim * self.num_memory_components, bias=False)
             self.mem_proj_scale = None
         elif self.memory_enabled:
             self.mem_proj = None
             self.mem_proj_in = None
             self.mem_proj_out = None
-            self.mem_proj_scale = nn.Parameter(torch.ones(self.num_kv_heads, self.num_mem_slots, self.head_dim))
+            self.mem_proj_scale = nn.Parameter(torch.ones(self.num_kv_heads, self.num_memory_components, self.head_dim))
         else:
             self.mem_proj = None
             self.mem_proj_in = None
@@ -194,14 +232,21 @@ class GatedMemSWA(nn.Module):
             return
         with torch.no_grad():
             self.log_mem_scale.fill_(math.log(self.mem_scale_init))
+            if self.mem_read_beta is not None:
+                self.mem_read_beta.fill_(1.0)
+            if self.mem_read_bias is not None:
+                self.mem_read_bias.fill_(-1.0)
             if self.mem_proj_scale is not None:
                 self.mem_proj_scale.fill_(1.0)
         if self.gate_net is not None:
-            nn.init.zeros_(self.gate_net.weight)
-            nn.init.constant_(self.gate_net.bias, self.gate_bias_init)
+            with torch.no_grad():
+                nn.init.zeros_(self.gate_net.weight)
+                nn.init.constant_(self.gate_net.bias, self.gate_bias_init)
         elif self.gate_param is not None:
             nn.init.constant_(self.gate_param, self.gate_bias_init)
         proj_gain = 1.0 / math.sqrt(max(self.num_mem_slots, 1))
+        if self.mem_key_proj is not None:
+            nn.init.xavier_uniform_(self.mem_key_proj.weight, gain=proj_gain)
         if self.mem_proj is not None:
             nn.init.xavier_uniform_(self.mem_proj.weight, gain=proj_gain)
         if self.mem_proj_in is not None:
@@ -362,12 +407,31 @@ class GatedMemSWA(nn.Module):
     def _normalize_memory(self, memory_state: torch.Tensor) -> torch.Tensor:
         if not self.mem_norm:
             return memory_state
-        # Keep the memory bounded in forward without backpropagating through the norm.
-        scale = memory_state.detach().float().square().sum(dim=-1, keepdim=True).clamp_min(1.0).sqrt_()
+        # Bound the per-dimension RMS instead of the raw L2 norm so the clip
+        # threshold stays invariant to head_dim and does not erase healthy
+        # write-strength differences just because the state lives in 64 dims.
+        scale = memory_state.detach().float().square().mean(dim=-1, keepdim=True).clamp_min(1.0).sqrt_()
         return memory_state / scale.to(dtype=memory_state.dtype)
+
+    def _new_memory_state(
+        self,
+        batch_size: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.zeros(
+            (batch_size, self.num_kv_heads, self.memory_state_rows, self.head_dim),
+            device=device,
+            dtype=dtype,
+        )
 
     def _memory_kv(self, memory_state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         mem_scale = self.mem_scale.to(device=memory_state.device, dtype=memory_state.dtype)
+        if self.decoupled_memory_component and memory_state.shape[-2] == 2:
+            mem_k = memory_state[..., :1, :]
+            mem_v = memory_state[..., 1:2, :] * mem_scale
+            return mem_k, mem_v
         return memory_state, memory_state * mem_scale
 
     def _expand_kv_to_query_heads(self, kv_states: torch.Tensor) -> torch.Tensor:
@@ -390,9 +454,83 @@ class GatedMemSWA(nn.Module):
             return query_states.view(batch_size, seq_len, self.num_kv_heads, self.num_kv_groups, head_dim)[:, :, :, 0]
         raise ValueError(f"Unsupported query state rank: {query_states.dim()}")
 
+    def _pool_query_groups(self, query_states: torch.Tensor) -> torch.Tensor:
+        if self.num_kv_groups == 1:
+            return query_states
+        if query_states.dim() == 3:
+            batch_size, _, head_dim = query_states.shape
+            return query_states.view(batch_size, self.num_kv_heads, self.num_kv_groups, head_dim).mean(dim=2)
+        if query_states.dim() == 4:
+            batch_size, seq_len, _, head_dim = query_states.shape
+            return query_states.view(batch_size, seq_len, self.num_kv_heads, self.num_kv_groups, head_dim).mean(dim=3)
+        raise ValueError(f"Unsupported query state rank: {query_states.dim()}")
+
     def _memory_kv_for_queries(self, memory_state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         mem_k, mem_v = self._memory_kv(memory_state)
         return self._expand_kv_to_query_heads(mem_k), self._expand_kv_to_query_heads(mem_v)
+
+    def _structured_memory_read(
+        self,
+        q: torch.Tensor,
+        memory_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        dtype = q.dtype
+        state = memory_state.to(torch.float32)
+        mem_scale = self.mem_scale.to(device=state.device, dtype=state.dtype)
+        state = state * mem_scale
+        proj_dtype = self.mem_read_proj.weight.dtype
+        gate_dtype = self.mem_read_gate.weight.dtype
+
+        if q.dim() == 4:
+            if state.dim() == 4:
+                state = state.unsqueeze(1).expand(-1, q.shape[1], -1, -1, -1)
+            q_proj = q.to(proj_dtype)
+            q_gate = q.to(gate_dtype)
+            read_query = self.mem_read_proj(q_proj)
+            read_gate = torch.sigmoid(self.mem_read_gate(q_gate).float())
+            if q.shape[2] == self.num_heads and self.num_kv_groups > 1:
+                batch_size, seq_len = q.shape[:2]
+                read_query = read_query.view(
+                    batch_size,
+                    seq_len,
+                    self.num_kv_heads,
+                    self.num_kv_groups,
+                    self.memory_state_rank,
+                )
+                read_gate = read_gate.view(batch_size, seq_len, self.num_kv_heads, self.num_kv_groups, 1)
+                mem_out = torch.einsum("bthgr,bthrd->bthgd", read_query.float(), state).reshape(
+                    batch_size,
+                    seq_len,
+                    self.num_heads,
+                    self.head_dim,
+                )
+                mem_gate = read_gate.reshape(batch_size, seq_len, self.num_heads, 1)
+            else:
+                mem_out = torch.einsum("bthr,bthrd->bthd", read_query.float(), state)
+                mem_gate = read_gate
+            return mem_out.to(dtype), mem_gate.to(dtype)
+
+        if q.dim() == 3:
+            q_proj = q.to(proj_dtype)
+            q_gate = q.to(gate_dtype)
+            read_query = self.mem_read_proj(q_proj)
+            read_gate = torch.sigmoid(self.mem_read_gate(q_gate).float())
+            if q.shape[1] == self.num_heads and self.num_kv_groups > 1:
+                batch_size = q.shape[0]
+                read_query = read_query.view(batch_size, self.num_kv_heads, self.num_kv_groups, self.memory_state_rank)
+                read_gate = read_gate.view(batch_size, self.num_kv_heads, self.num_kv_groups, 1)
+                mem_out = torch.einsum("bhgr,bhrd->bhgd", read_query.float(), state).reshape(
+                    batch_size,
+                    self.num_heads,
+                    self.head_dim,
+                )
+                mem_gate = read_gate.reshape(batch_size, self.num_heads, 1)
+            else:
+                mem_out = torch.einsum("bhr,bhrd->bhd", read_query.float(), state)
+                mem_gate = read_gate
+            return mem_out.to(dtype), mem_gate.to(dtype)
+
+        raise ValueError(f"Unsupported query rank for structured memory read: {q.dim()}")
 
     @property
     def mem_scale(self) -> torch.Tensor:
@@ -402,18 +540,42 @@ class GatedMemSWA(nn.Module):
         if not self.memory_enabled:
             raise RuntimeError("memory gate requested while memory is disabled")
         if self.mem_gate_mode == "linear":
-            gate = self.gate_net(gate_input)
-            gate = gate.unflatten(-1, (self.num_kv_heads, self.gate_num_slots))
-            gate = torch.sigmoid(gate.float()).to(dtype=gate.dtype)
+            gate_logits = self.gate_net(gate_input)
+            gate_logits = gate_logits.unflatten(-1, (self.num_kv_heads, self.gate_num_components))
+            gate = torch.sigmoid(gate_logits.float()).to(dtype=gate_logits.dtype)
         else:
             gate = torch.sigmoid(self.gate_param.float()).to(dtype=gate_input.dtype)
             if gate_input.dim() == 3:
-                gate = gate.view(1, 1, self.num_kv_heads, self.gate_num_slots).expand(
+                gate = gate.view(1, 1, self.num_kv_heads, self.gate_num_components).expand(
                     gate_input.shape[0], gate_input.shape[1], -1, -1
                 )
             else:
-                gate = gate.view(1, self.num_kv_heads, self.gate_num_slots).expand(gate_input.shape[0], -1, -1)
+                gate = gate.view(1, self.num_kv_heads, self.gate_num_components).expand(gate_input.shape[0], -1, -1)
         return gate.clamp(min=self.gate_clamp_eps, max=1.0 - self.gate_clamp_eps)
+
+    def _compute_evicted_gate(
+        self,
+        evicted_k: torch.Tensor | None,
+        evicted_v: torch.Tensor,
+        local_summary: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        innovation_v = self._memory_component_innovation(evicted_v, local_summary)
+        gate_input = self._gate_input_from_evicted_content(evicted_k, innovation_v)
+        return self._compute_gate(gate_input)
+
+    def _gate_input_from_evicted_content(
+        self,
+        evicted_k: torch.Tensor | None,
+        evicted_v: torch.Tensor,
+    ) -> torch.Tensor:
+        gate_source = self._memory_update_input(evicted_k, evicted_v)
+        if gate_source.dim() == 3:
+            gate_source = repeat_kv(gate_source.unsqueeze(1), self.num_kv_groups).squeeze(1)
+            return gate_source.reshape(gate_source.shape[0], self.dim)
+        if gate_source.dim() == 4:
+            gate_source = repeat_kv(gate_source, self.num_kv_groups)
+            return gate_source.reshape(gate_source.shape[0], gate_source.shape[1], self.dim)
+        raise ValueError(f"Unsupported evicted content rank for gate input: {gate_source.dim()}")
 
     def _memory_update_input(self, evicted_k: torch.Tensor | None, evicted_v: torch.Tensor) -> torch.Tensor:
         if self.mem_update_source == "value":
@@ -426,21 +588,37 @@ class GatedMemSWA(nn.Module):
         # gradient contribution to the memory update.
         return (evicted_k * self.scaling + evicted_v) * math.sqrt(0.5)
 
-    def _project_memory_update(self, evicted_k: torch.Tensor | None, evicted_v: torch.Tensor) -> torch.Tensor:
+    def _collapse_local_summary(self, local_out: torch.Tensor) -> torch.Tensor:
+        return self._collapse_query_groups(local_out)
+
+    def _memory_component_innovation(
+        self,
+        evicted_v: torch.Tensor,
+        local_summary: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        innovation = evicted_v if local_summary is None else (evicted_v - local_summary)
+        self._accumulate_selection_metric(
+            "memory_innovation_rms",
+            innovation.detach().float().square().mean(dim=-1).sqrt(),
+        )
+        return innovation
+
+    def _project_memory_update(
+        self,
+        evicted_k: torch.Tensor | None,
+        evicted_v: torch.Tensor,
+        local_summary: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if not self.memory_enabled:
             raise RuntimeError("memory projection requested while memory is disabled")
-        update_input = self._memory_update_input(evicted_k, evicted_v)
+        value_source = self._memory_component_innovation(evicted_v, local_summary)
+        update_input = value_source if self.decoupled_memory_component else self._memory_update_input(evicted_k, evicted_v)
         self._debug_large("update_input", update_input)
-        source_scale = update_input.detach().float().norm(dim=-1, keepdim=True).clamp_min(1.0)
-        update_input = update_input / source_scale.to(dtype=update_input.dtype)
-        self._debug_large("update_input_scaled", update_input)
         if self.mem_proj_mode == "scale":
             scale = self.mem_proj_scale.to(device=update_input.device, dtype=update_input.dtype)
             if update_input.dim() == 3:
                 projected = update_input.unsqueeze(-2) * scale.unsqueeze(0)
-                self._debug_large("projected_update", projected)
-                return self._normalize_memory(projected.to(torch.float32)).to(dtype=update_input.dtype)
-            if update_input.dim() == 4:
+            elif update_input.dim() == 4:
                 projected = update_input.unsqueeze(-2) * scale.view(
                     1,
                     1,
@@ -448,17 +626,24 @@ class GatedMemSWA(nn.Module):
                     self.num_mem_slots,
                     self.head_dim,
                 )
-                self._debug_large("projected_update", projected)
-                return self._normalize_memory(projected.to(torch.float32)).to(dtype=update_input.dtype)
-            raise ValueError(f"Unsupported memory update rank: {update_input.dim()}")
-
-        if self.mem_proj is not None:
-            projected = self.mem_proj(update_input)
+            else:
+                raise ValueError(f"Unsupported memory update rank: {update_input.dim()}")
         else:
-            projected = self.mem_proj_out(self.mem_proj_in(update_input))
-        self._debug_large("projected_update", projected)
-        projected = projected.unflatten(-1, (self.num_mem_slots, self.head_dim))
-        return self._normalize_memory(projected.to(torch.float32)).to(dtype=update_input.dtype)
+            if self.mem_proj is not None:
+                projected = self.mem_proj(update_input)
+            else:
+                projected = self.mem_proj_out(self.mem_proj_in(update_input))
+            self._debug_large("projected_update", projected)
+            projected = projected.unflatten(-1, (self.num_mem_slots, self.head_dim))
+
+        value_update = self._normalize_memory(projected.to(torch.float32)).to(dtype=update_input.dtype)
+        if not self.decoupled_memory_component:
+            return value_update
+
+        key_source = evicted_k if evicted_k is not None else update_input
+        key_update = self.mem_key_proj(key_source)
+        key_update = self._normalize_memory(key_update.unsqueeze(-2).to(torch.float32)).to(dtype=update_input.dtype)
+        return torch.cat([key_update, value_update], dim=-2)
 
     def _should_update_memory(self, seen_tokens_before_append: int) -> bool:
         if seen_tokens_before_append < self.window_size:
@@ -480,12 +665,15 @@ class GatedMemSWA(nn.Module):
         memory_state: torch.Tensor | None,
         evicted_k: torch.Tensor | None,
         evicted_v: torch.Tensor,
-        gate_input: torch.Tensor,
+        local_summary: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         if not self.memory_enabled or memory_state is None:
             return memory_state
-        gate = self._compute_gate(gate_input).unsqueeze(-1).to(device=memory_state.device, dtype=memory_state.dtype)
-        mem_update = self._project_memory_update(evicted_k, evicted_v).to(
+        gate = self._compute_evicted_gate(evicted_k, evicted_v, local_summary=local_summary).unsqueeze(-1).to(
+            device=memory_state.device,
+            dtype=memory_state.dtype,
+        )
+        mem_update = self._project_memory_update(evicted_k, evicted_v, local_summary=local_summary).to(
             device=memory_state.device,
             dtype=memory_state.dtype,
         )
@@ -497,26 +685,23 @@ class GatedMemSWA(nn.Module):
         batch_size: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         memory_state = None
         if self.memory_enabled:
-            memory_state = torch.zeros(
-                (batch_size, self.num_kv_heads, self.num_mem_slots, self.head_dim),
-                device=device,
-                dtype=dtype,
-            )
+            memory_state = self._new_memory_state(batch_size, device=device, dtype=dtype)
         k_cached = None
         v_cached = None
         k_write_cached = None
+        local_summary_cached = None
 
         if past_key_values is None or self.layer_idx is None:
-            return memory_state, k_cached, v_cached, k_write_cached
+            return memory_state, k_cached, v_cached, k_write_cached, local_summary_cached
         if len(past_key_values) <= self.layer_idx:
-            return memory_state, k_cached, v_cached, k_write_cached
+            return memory_state, k_cached, v_cached, k_write_cached, local_summary_cached
 
         state = past_key_values[self.layer_idx]
         if state is None:
-            return memory_state, k_cached, v_cached, k_write_cached
+            return memory_state, k_cached, v_cached, k_write_cached, local_summary_cached
 
         cached_mem = state.get("recurrent_state")
         if cached_mem is not None and self.memory_enabled:
@@ -528,20 +713,28 @@ class GatedMemSWA(nn.Module):
 
         attn_state = state.get("attn_state")
         if attn_state is not None:
-            if len(attn_state) == 3:
-                k_flat, v_flat, k_write_flat = attn_state
+            if len(attn_state) >= 3:
+                k_flat, v_flat, k_write_flat = attn_state[:3]
                 k_write_cached = k_write_flat.view(batch_size, -1, self.num_kv_heads, self.head_dim).to(
                     device=device,
                     dtype=dtype,
                 )
+                if len(attn_state) >= 4:
+                    local_summary_flat = attn_state[3]
+                    local_summary_cached = local_summary_flat.view(batch_size, -1, self.num_kv_heads, self.head_dim).to(
+                        device=device,
+                        dtype=dtype,
+                    )
             else:
                 k_flat, v_flat = attn_state
             k_cached = k_flat.view(batch_size, -1, self.num_heads, self.head_dim).to(device=device, dtype=dtype)
             v_cached = v_flat.view(batch_size, -1, self.num_heads, self.head_dim).to(device=device, dtype=dtype)
             if k_write_cached is None:
                 k_write_cached = self._collapse_query_groups(k_cached)
+            if local_summary_cached is None:
+                local_summary_cached = self._collapse_local_summary(v_cached)
 
-        return memory_state, k_cached, v_cached, k_write_cached
+        return memory_state, k_cached, v_cached, k_write_cached, local_summary_cached
 
     def _prepare_cache_state(
         self,
@@ -549,8 +742,8 @@ class GatedMemSWA(nn.Module):
         batch_size: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> tuple[torch.Tensor | None, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-        memory_state, k_cached, v_cached, k_write_cached = self._load_cached_state(
+    ) -> tuple[torch.Tensor | None, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+        memory_state, k_cached, v_cached, k_write_cached, local_summary_cached = self._load_cached_state(
             past_key_values,
             batch_size,
             device,
@@ -559,7 +752,10 @@ class GatedMemSWA(nn.Module):
         window_k = [] if k_cached is None else [k_cached[:, i] for i in range(k_cached.shape[1])]
         window_v = [] if v_cached is None else [v_cached[:, i] for i in range(v_cached.shape[1])]
         window_k_write = [] if k_write_cached is None else [k_write_cached[:, i] for i in range(k_write_cached.shape[1])]
-        return memory_state, window_k, window_v, window_k_write
+        window_local_summary = (
+            [] if local_summary_cached is None else [local_summary_cached[:, i] for i in range(local_summary_cached.shape[1])]
+        )
+        return memory_state, window_k, window_v, window_k_write, window_local_summary
 
     def _pack_cache_state(
         self,
@@ -620,8 +816,8 @@ class GatedMemSWA(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         batch_size, seq_len, num_heads, _ = gates.shape
         flat_gates = gates.squeeze(-1)
-        flat_updates = updates.reshape(batch_size, seq_len, num_heads, self.num_mem_slots * self.head_dim)
-        flat_state = memory_state.reshape(memory_state.shape[0], num_heads, self.num_mem_slots * self.head_dim).float()
+        flat_updates = updates.reshape(batch_size, seq_len, num_heads, self.memory_state_rows * self.head_dim)
+        flat_state = memory_state.reshape(memory_state.shape[0], num_heads, self.memory_state_rows * self.head_dim).float()
         if gates.is_cuda:
             state_seq, final_state = fused_recurrent_gm_swa(
                 x=flat_updates,
@@ -629,7 +825,7 @@ class GatedMemSWA(nn.Module):
                 initial_state=flat_state,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
-                truncate_backward=True,
+                truncate_backward=False,
             )
         else:
             return self._run_memory_scan_torch(
@@ -640,9 +836,9 @@ class GatedMemSWA(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
 
-        state_seq = state_seq.view(batch_size, seq_len, num_heads, self.num_mem_slots, self.head_dim)
+        state_seq = state_seq.view(batch_size, seq_len, num_heads, self.memory_state_rows, self.head_dim)
         if final_state is not None:
-            final_state = final_state.view(memory_state.shape[0], num_heads, self.num_mem_slots, self.head_dim)
+            final_state = final_state.view(memory_state.shape[0], num_heads, self.memory_state_rows, self.head_dim)
         return state_seq, final_state
 
     def _run_per_slot_memory_scan(
@@ -666,7 +862,7 @@ class GatedMemSWA(nn.Module):
                 initial_state=flat_state,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
-                truncate_backward=True,
+                truncate_backward=False,
             )
         else:
             return self._run_memory_scan_torch(
@@ -777,6 +973,7 @@ class GatedMemSWA(nn.Module):
         hidden_states: torch.Tensor,
         k_kv: torch.Tensor,
         v_kv: torch.Tensor,
+        local_summary: torch.Tensor | None = None,
         *,
         valid_tokens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -787,7 +984,7 @@ class GatedMemSWA(nn.Module):
             batch_size,
             seq_len,
             self.num_kv_heads,
-            self.gate_num_slots,
+            self.memory_state_rows,
             device=device,
             dtype=dtype,
         )
@@ -795,7 +992,7 @@ class GatedMemSWA(nn.Module):
             batch_size,
             seq_len,
             self.num_kv_heads,
-            self.num_mem_slots,
+            self.memory_state_rows,
             self.head_dim,
             device=device,
             dtype=dtype,
@@ -815,15 +1012,23 @@ class GatedMemSWA(nn.Module):
         if not update_mask.any():
             return gates, updates
 
-        gate_values = self._compute_gate(hidden_states[:, self.window_size:]).to(dtype=dtype)
+        gate_values = self._compute_evicted_gate(
+            k_kv[:, : seq_len - self.window_size],
+            v_kv[:, : seq_len - self.window_size],
+            None if local_summary is None else local_summary[:, : seq_len - self.window_size],
+        ).to(dtype=dtype)
         update_values = self._project_memory_update(
             k_kv[:, : seq_len - self.window_size],
             v_kv[:, : seq_len - self.window_size],
+            None if local_summary is None else local_summary[:, : seq_len - self.window_size],
         ).to(dtype=dtype)
         selected_gates = gate_values[update_mask]
         self._accumulate_selection_metric("gate_mean", selected_gates)
         self._accumulate_selection_metric("gate_low_frac", (selected_gates < 0.1).float())
         self._accumulate_selection_metric("gate_high_frac", (selected_gates > 0.9).float())
+        if selected_gates.shape[-1] == 2:
+            self._accumulate_selection_metric("gate_key_mean", selected_gates[..., 0])
+            self._accumulate_selection_metric("gate_value_mean", selected_gates[..., 1])
         gates[:, self.window_size:] = torch.where(
             update_mask.unsqueeze(-1).unsqueeze(-1),
             gate_values,
@@ -841,6 +1046,7 @@ class GatedMemSWA(nn.Module):
         hidden_states: torch.Tensor,
         k_kv: torch.Tensor,
         v_kv: torch.Tensor,
+        local_summary: torch.Tensor | None,
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         total_tokens = hidden_states.shape[1]
@@ -850,7 +1056,7 @@ class GatedMemSWA(nn.Module):
             1,
             total_tokens,
             self.num_kv_heads,
-            self.gate_num_slots,
+            self.memory_state_rows,
             device=device,
             dtype=dtype,
         )
@@ -858,7 +1064,7 @@ class GatedMemSWA(nn.Module):
             1,
             total_tokens,
             self.num_kv_heads,
-            self.num_mem_slots,
+            self.memory_state_rows,
             self.head_dim,
             device=device,
             dtype=dtype,
@@ -873,15 +1079,23 @@ class GatedMemSWA(nn.Module):
             update_mask &= ((pos_ids - self.window_size) % self.mem_update_stride) == 0
 
         if update_mask.any():
-            gate_values = self._compute_gate(hidden_states.squeeze(0)[update_mask]).to(dtype=dtype)
             source_idx = cu_seqlens[seq_ids[update_mask]] + (pos_ids[update_mask] - self.window_size)
+            gate_values = self._compute_evicted_gate(
+                k_kv.squeeze(0)[source_idx],
+                v_kv.squeeze(0)[source_idx],
+                None if local_summary is None else local_summary.squeeze(0)[source_idx],
+            ).to(dtype=dtype)
             update_values = self._project_memory_update(
                 k_kv.squeeze(0)[source_idx],
                 v_kv.squeeze(0)[source_idx],
+                None if local_summary is None else local_summary.squeeze(0)[source_idx],
             ).to(dtype=dtype)
             self._accumulate_selection_metric("gate_mean", gate_values)
             self._accumulate_selection_metric("gate_low_frac", (gate_values < 0.1).float())
             self._accumulate_selection_metric("gate_high_frac", (gate_values > 0.9).float())
+            if gate_values.shape[-1] == 2:
+                self._accumulate_selection_metric("gate_key_mean", gate_values[..., 0])
+                self._accumulate_selection_metric("gate_value_mean", gate_values[..., 1])
             gates[0, update_mask] = gate_values
             updates[0, update_mask] = update_values
 
@@ -920,10 +1134,13 @@ class GatedMemSWA(nn.Module):
         valid_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         dtype = q.dtype
-        memory_states = self._normalize_memory(memory_states.to(torch.float32)).to(dtype)
+        memory_states = memory_states.to(torch.float32)
         self._debug_nonfinite("memory_states", memory_states)
         self._debug_large("memory_states", memory_states)
         mem_k, mem_v = self._memory_kv(memory_states)
+        mem_k = self._normalize_memory(mem_k).to(dtype)
+        mem_v = mem_v.to(dtype)
+        memory_rows = mem_k.shape[-2]
 
         lse_local = lse_local.transpose(1, 2).to(torch.float32)
         memory_available = memory_available.unsqueeze(-1).expand(-1, -1, self.num_heads)
@@ -936,31 +1153,27 @@ class GatedMemSWA(nn.Module):
             q_grouped = q.view(batch_size, seq_len, self.num_kv_heads, self.num_kv_groups, self.head_dim)
             stats_mask = memory_available if valid_heads is None else (memory_available & valid_heads)
             stats_mask_grouped = stats_mask.view(batch_size, seq_len, self.num_kv_heads, self.num_kv_groups)
-            if self.num_mem_slots == 1:
+            if memory_rows == 1:
                 mem_k = mem_k.squeeze(-2)
                 mem_v = mem_v.squeeze(-2)
                 mem_score = torch.einsum("bthgd,bthd->bthg", q_grouped, mem_k).reshape(batch_size, seq_len, self.num_heads)
                 mem_score = mem_score.to(torch.float32) * self.scaling
-                self._debug_large("mem_score", mem_score)
-                mem_score = mem_score.masked_fill(~memory_available, float("-inf"))
-                total_lse = torch.logaddexp(lse_local, mem_score)
-                self._debug_large("mem_total_lse", total_lse)
+                mem_gate = torch.sigmoid(
+                    mem_score * self.mem_read_beta.to(device=mem_score.device, dtype=mem_score.dtype)
+                    + self.mem_read_bias.to(device=mem_score.device, dtype=mem_score.dtype)
+                )
+                mem_gate = torch.where(memory_available, mem_gate, torch.zeros_like(mem_gate))
                 if valid_heads is not None:
-                    total_lse = torch.where(valid_heads, total_lse, torch.zeros_like(total_lse))
-                    local_weight = torch.where(valid_heads, torch.exp(lse_local - total_lse), torch.zeros_like(total_lse))
-                    mem_weight = torch.where(valid_heads, torch.exp(mem_score - total_lse), torch.zeros_like(total_lse))
-                else:
-                    local_weight = torch.exp(lse_local - total_lse)
-                    mem_weight = torch.exp(mem_score - total_lse)
-                self._debug_large("mem_weight", mem_weight)
-                self._accumulate_selection_metric("mem_weight_mean", mem_weight, stats_mask)
+                    mem_gate = torch.where(valid_heads, mem_gate, torch.zeros_like(mem_gate))
+                self._debug_large("mem_gate", mem_gate)
+                self._accumulate_selection_metric("mem_weight_mean", mem_gate, stats_mask)
                 mem_out = mem_v.unsqueeze(3).expand(-1, -1, -1, self.num_kv_groups, -1).reshape(
                     batch_size,
                     seq_len,
                     self.num_heads,
                     self.head_dim,
                 )
-                out = local_weight.to(dtype).unsqueeze(-1) * o_local + mem_weight.to(dtype).unsqueeze(-1) * mem_out
+                out = o_local + mem_gate.to(dtype).unsqueeze(-1) * (mem_out - o_local)
             else:
                 mem_logits = torch.einsum("bthgd,bthsd->bthgs", q_grouped, mem_k)
                 mem_logits = mem_logits.to(torch.float32) * self.scaling
@@ -971,7 +1184,7 @@ class GatedMemSWA(nn.Module):
                 mem_lse = mem_lse.masked_fill(~memory_available, float("-inf"))
                 mem_probs = torch.softmax(mem_logits, dim=-1).to(dtype)
                 slot_entropy = -(mem_probs.float() * mem_probs.float().clamp_min(self.mem_norm_eps).log()).sum(dim=-1)
-                slot_entropy = slot_entropy / math.log(self.num_mem_slots)
+                slot_entropy = slot_entropy / math.log(memory_rows)
                 self._accumulate_selection_metric("slot_entropy", slot_entropy, stats_mask_grouped)
                 mem_out = torch.einsum("bthgs,bthsd->bthgd", mem_probs, mem_v).reshape(
                     batch_size,
@@ -998,24 +1211,20 @@ class GatedMemSWA(nn.Module):
             return out
 
         stats_mask = memory_available if valid_heads is None else (memory_available & valid_heads)
-        if self.num_mem_slots == 1:
+        if memory_rows == 1:
             mem_k = mem_k.squeeze(-2)
             mem_v = mem_v.squeeze(-2)
             mem_score = torch.einsum("bthd,bthd->bth", q, mem_k).to(torch.float32) * self.scaling
-            self._debug_large("mem_score", mem_score)
-            mem_score = mem_score.masked_fill(~memory_available, float("-inf"))
-            total_lse = torch.logaddexp(lse_local, mem_score)
-            self._debug_large("mem_total_lse", total_lse)
+            mem_gate = torch.sigmoid(
+                mem_score * self.mem_read_beta.to(device=mem_score.device, dtype=mem_score.dtype)
+                + self.mem_read_bias.to(device=mem_score.device, dtype=mem_score.dtype)
+            )
+            mem_gate = torch.where(memory_available, mem_gate, torch.zeros_like(mem_gate))
             if valid_heads is not None:
-                total_lse = torch.where(valid_heads, total_lse, torch.zeros_like(total_lse))
-                local_weight = torch.where(valid_heads, torch.exp(lse_local - total_lse), torch.zeros_like(total_lse))
-                mem_weight = torch.where(valid_heads, torch.exp(mem_score - total_lse), torch.zeros_like(total_lse))
-            else:
-                local_weight = torch.exp(lse_local - total_lse)
-                mem_weight = torch.exp(mem_score - total_lse)
-            self._debug_large("mem_weight", mem_weight)
-            self._accumulate_selection_metric("mem_weight_mean", mem_weight, stats_mask)
-            out = local_weight.to(dtype).unsqueeze(-1) * o_local + mem_weight.to(dtype).unsqueeze(-1) * mem_v
+                mem_gate = torch.where(valid_heads, mem_gate, torch.zeros_like(mem_gate))
+            self._debug_large("mem_gate", mem_gate)
+            self._accumulate_selection_metric("mem_weight_mean", mem_gate, stats_mask)
+            out = o_local + mem_gate.to(dtype).unsqueeze(-1) * (mem_v - o_local)
         else:
             mem_logits = torch.einsum("bthd,bthsd->bths", q, mem_k).to(torch.float32) * self.scaling
             self._debug_large("mem_logits", mem_logits)
@@ -1024,7 +1233,7 @@ class GatedMemSWA(nn.Module):
             mem_lse = mem_lse.masked_fill(~memory_available, float("-inf"))
             mem_probs = torch.softmax(mem_logits, dim=-1).to(dtype)
             slot_entropy = -(mem_probs.float() * mem_probs.float().clamp_min(self.mem_norm_eps).log()).sum(dim=-1)
-            slot_entropy = slot_entropy / math.log(self.num_mem_slots)
+            slot_entropy = slot_entropy / math.log(memory_rows)
             self._accumulate_selection_metric("slot_entropy", slot_entropy, stats_mask)
             mem_out = torch.einsum("bths,bthsd->bthd", mem_probs, mem_v)
             total_lse = torch.logaddexp(lse_local, mem_lse)
@@ -1067,16 +1276,17 @@ class GatedMemSWA(nn.Module):
         memory_state: torch.Tensor,
     ) -> torch.Tensor:
         dtype = q_t.dtype
-        mem_state = self._normalize_memory(memory_state.to(torch.float32)).to(dtype)
+        mem_state = memory_state.to(torch.float32)
         mem_k, mem_v = self._memory_kv_for_queries(mem_state)
-        mem_k = mem_k.squeeze(-2)
-        mem_v = mem_v.squeeze(-2)
+        mem_k = self._normalize_memory(mem_k).to(dtype).squeeze(-2)
+        mem_v = mem_v.to(dtype).squeeze(-2)
         mem_score = torch.einsum("bhd,bhd->bh", q_t, mem_k).to(torch.float32) * self.scaling
-        total_lse = torch.logaddexp(lse_local, mem_score)
-        local_weight = torch.exp(lse_local - total_lse)
-        mem_weight = torch.exp(mem_score - total_lse)
-        self._accumulate_selection_metric("mem_weight_mean", mem_weight)
-        return local_weight.to(dtype).unsqueeze(-1) * o_local + mem_weight.to(dtype).unsqueeze(-1) * mem_v
+        mem_gate = torch.sigmoid(
+            mem_score * self.mem_read_beta.to(device=mem_score.device, dtype=mem_score.dtype)
+            + self.mem_read_bias.to(device=mem_score.device, dtype=mem_score.dtype)
+        )
+        self._accumulate_selection_metric("mem_weight_mean", mem_gate)
+        return o_local + mem_gate.to(dtype).unsqueeze(-1) * (mem_v - o_local)
 
     def _combine_memory_step(
         self,
@@ -1085,7 +1295,7 @@ class GatedMemSWA(nn.Module):
         lse_local: torch.Tensor,
         memory_state: torch.Tensor,
     ) -> torch.Tensor:
-        if self.num_mem_slots == 1:
+        if self.num_memory_components == 1:
             return self._combine_single_memory_step(q_t, o_local, lse_local, memory_state)
         batch_size = q_t.shape[0]
         memory_available = torch.ones((batch_size, 1), device=q_t.device, dtype=torch.bool)
@@ -1115,7 +1325,14 @@ class GatedMemSWA(nn.Module):
             return o_local, memory_state
 
         valid_tokens = torch.arange(seq_len, device=q.device).unsqueeze(0) < seq_lens.unsqueeze(1)
-        gates, updates = self._build_memory_inputs(hidden_states, k_kv, v_kv, valid_tokens=valid_tokens)
+        local_summary = self._collapse_local_summary(o_local)
+        gates, updates = self._build_memory_inputs(
+            hidden_states,
+            k_kv,
+            v_kv,
+            local_summary=local_summary,
+            valid_tokens=valid_tokens,
+        )
         self._debug_nonfinite_grad("updates", updates)
         memory_states, final_state = self._run_fused_memory_scan(
             gates,
@@ -1156,7 +1373,13 @@ class GatedMemSWA(nn.Module):
         if seq_len == 0:
             return o_local, memory_state
 
-        gates, updates = self._build_memory_inputs(hidden_states, k_kv, v_kv)
+        local_summary = self._collapse_local_summary(o_local)
+        gates, updates = self._build_memory_inputs(
+            hidden_states,
+            k_kv,
+            v_kv,
+            local_summary=local_summary,
+        )
         self._debug_nonfinite_grad("updates", updates)
         memory_states, final_state = self._run_fused_memory_scan(
             gates,
@@ -1170,7 +1393,13 @@ class GatedMemSWA(nn.Module):
             batch_size=batch_size,
             has_prior_memory=has_prior_memory,
         )
-        out = self._combine_memory_with_local(q, o_local, lse_local, memory_states, memory_available)
+        out = self._combine_memory_with_local(
+            q,
+            o_local,
+            lse_local,
+            memory_states,
+            memory_available,
+        )
         return out, final_state.to(dtype=q.dtype)
 
     def _memory_and_combine_varlen(
@@ -1187,12 +1416,15 @@ class GatedMemSWA(nn.Module):
             cu_seqlens = cu_seqlens.squeeze(0)
 
         num_seqs = cu_seqlens.numel() - 1
-        memory_state = torch.zeros(
-            (num_seqs, self.num_kv_heads, self.num_mem_slots, self.head_dim),
-            device=q.device,
-            dtype=torch.float32,
+        memory_state = self._new_memory_state(num_seqs, device=q.device, dtype=torch.float32)
+        local_summary = self._collapse_local_summary(o_local)
+        gates, updates, pos_ids = self._build_varlen_memory_inputs(
+            hidden_states,
+            k_kv,
+            v_kv,
+            local_summary,
+            cu_seqlens,
         )
-        gates, updates, pos_ids = self._build_varlen_memory_inputs(hidden_states, k_kv, v_kv, cu_seqlens)
         self._debug_nonfinite("gates", gates)
         self._debug_nonfinite("updates", updates)
         self._debug_large("gates", gates)
@@ -1213,7 +1445,13 @@ class GatedMemSWA(nn.Module):
             batch_size=1,
             has_prior_memory=False,
         )
-        return self._combine_memory_with_local(q, o_local, lse_local, memory_states, memory_available)
+        return self._combine_memory_with_local(
+            q,
+            o_local,
+            lse_local,
+            memory_states,
+            memory_available,
+        )
 
     def _forward_fast(
         self,
@@ -1221,7 +1459,7 @@ class GatedMemSWA(nn.Module):
         attention_mask: torch.Tensor | None = None,
         *,
         cu_seqlens: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         if flash_attn_func is None:
             raise RuntimeError("flash-attn is required for fast GM-SWA training.")
 
@@ -1245,6 +1483,7 @@ class GatedMemSWA(nn.Module):
         k_cache = None
         v_cache = None
         k_write_cache = None
+        local_summary_cache = None
         scatter_info = None
         masked_seq_lens = None
 
@@ -1338,6 +1577,7 @@ class GatedMemSWA(nn.Module):
             k_cache = k_local
             v_cache = v_local
             k_write_cache = k_kv_write
+            local_summary_cache = self._collapse_local_summary(local_out)
             self._debug_nonfinite("local_out", local_out)
             self._debug_large("local_out", local_out)
             self._debug_nonfinite_grad("local_out", local_out)
@@ -1346,7 +1586,7 @@ class GatedMemSWA(nn.Module):
             out = local_out
             memory_state = None
         else:
-            memory_state = hidden_states.new_zeros(batch_size, self.num_kv_heads, self.num_mem_slots, self.head_dim)
+            memory_state = self._new_memory_state(batch_size, device=hidden_states.device, dtype=hidden_states.dtype)
             if masked_seq_lens is not None:
                 out, memory_state = self._memory_and_combine_padded(
                     q,
@@ -1390,7 +1630,7 @@ class GatedMemSWA(nn.Module):
             padded_out = out.new_zeros(batch_size, original_seq_len, out.shape[-1])
             padded_out[original_mask] = out[seq_ids, pos_ids]
             out = padded_out
-        return out, memory_state, k_cache, v_cache, k_write_cache
+        return out, memory_state, k_cache, v_cache, k_write_cache, local_summary_cache
 
     def _forward_projected(
         self,
@@ -1405,7 +1645,8 @@ class GatedMemSWA(nn.Module):
         window_k: list[torch.Tensor] | None = None,
         window_v: list[torch.Tensor] | None = None,
         window_k_write: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+        window_local_summary: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
         batch_size, seq_len, _ = hidden_states.shape
 
         if window_k is None:
@@ -1414,13 +1655,11 @@ class GatedMemSWA(nn.Module):
             window_v = []
         if window_k_write is None:
             window_k_write = []
+        if window_local_summary is None:
+            window_local_summary = []
 
         if self.memory_enabled and memory_state is None:
-            memory_state = torch.zeros(
-                (batch_size, self.num_kv_heads, self.num_mem_slots, self.head_dim),
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
-            )
+            memory_state = self._new_memory_state(batch_size, device=hidden_states.device, dtype=hidden_states.dtype)
 
         outputs = []
         for token_idx in range(seq_len):
@@ -1429,12 +1668,13 @@ class GatedMemSWA(nn.Module):
                 window_k.pop(0)
                 evicted_v = window_v.pop(0)
                 evicted_k_write = window_k_write.pop(0)
+                evicted_local_summary = window_local_summary.pop(0)
                 if self.memory_enabled and self._should_update_memory(seen_tokens_before_append):
                     memory_state = self._update_memory(
                         memory_state,
                         evicted_k_write,
                         self._collapse_query_groups(evicted_v),
-                        hidden_states[:, token_idx],
+                        local_summary=evicted_local_summary,
                     )
 
             window_k.append(k[:, token_idx])
@@ -1446,17 +1686,24 @@ class GatedMemSWA(nn.Module):
             q_t = q[:, token_idx].unsqueeze(2)
 
             use_memory = memory_state is not None and self._should_use_memory(seen_tokens_before_append)
-
             if use_memory:
                 o_local, lse_local = self._local_attention_step(q[:, token_idx], k_window, v_window)
-                attn_out = self._combine_memory_step(q[:, token_idx], o_local, lse_local, memory_state)
+                attn_out = self._combine_memory_step(
+                    q[:, token_idx],
+                    o_local,
+                    lse_local,
+                    memory_state,
+                )
                 attn_out = attn_out.reshape(batch_size, 1, -1)
+                local_summary_t = self._collapse_local_summary(o_local)
             else:
                 attn_out = F.scaled_dot_product_attention(q_t, k_window, v_window, is_causal=False)
                 attn_out = attn_out.squeeze(2).reshape(batch_size, 1, -1)
+                local_summary_t = self._collapse_local_summary(attn_out.view(batch_size, self.num_heads, self.head_dim))
             outputs.append(self.o_proj(attn_out))
+            window_local_summary.append(local_summary_t)
 
-        return torch.cat(outputs, dim=1), memory_state, window_k, window_v, window_k_write
+        return torch.cat(outputs, dim=1), memory_state, window_k, window_v, window_k_write, window_local_summary
 
     def _forward_full(
         self,
@@ -1468,7 +1715,8 @@ class GatedMemSWA(nn.Module):
         window_k: list[torch.Tensor] | None = None,
         window_v: list[torch.Tensor] | None = None,
         window_k_write: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+        window_local_summary: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
         if attention_mask is not None and not torch.all(attention_mask.bool()):
             raise ValueError("GatedMemSWA full fallback does not support padding masks; use flash-attn fast path.")
 
@@ -1492,6 +1740,7 @@ class GatedMemSWA(nn.Module):
             window_k=window_k,
             window_v=window_v,
             window_k_write=window_k_write,
+            window_local_summary=window_local_summary,
         )
 
     def _forward_cached(
@@ -1510,7 +1759,7 @@ class GatedMemSWA(nn.Module):
         k = repeat_kv(k, self.num_kv_groups)
         v = repeat_kv(v_kv, self.num_kv_groups)
 
-        memory_state, k_cached, v_cached, k_write_cached = self._load_cached_state(
+        memory_state, k_cached, v_cached, k_write_cached, local_summary_cached = self._load_cached_state(
             past_key_values,
             batch_size,
             hidden_states.device,
@@ -1520,46 +1769,60 @@ class GatedMemSWA(nn.Module):
             k_cached = k.new_empty((batch_size, 0, self.num_heads, self.head_dim))
             v_cached = v.new_empty((batch_size, 0, self.num_heads, self.head_dim))
             k_write_cached = k_write.new_empty((batch_size, 0, self.num_kv_heads, self.head_dim))
+            local_summary_cached = v_kv.new_empty((batch_size, 0, self.num_kv_heads, self.head_dim))
 
         if k_cached.shape[1] >= self.window_size:
             evicted_k_write = k_write_cached[:, 0]
             evicted_v = v_cached[:, 0]
+            evicted_local_summary = local_summary_cached[:, 0]
             k_cached = k_cached[:, 1:]
             v_cached = v_cached[:, 1:]
             k_write_cached = k_write_cached[:, 1:]
+            local_summary_cached = local_summary_cached[:, 1:]
             if self.memory_enabled and self._should_update_memory(seqlen_offset):
                 memory_state = self._update_memory(
                     memory_state,
                     evicted_k_write,
                     self._collapse_query_groups(evicted_v),
-                    hidden_states[:, 0],
+                    local_summary=evicted_local_summary,
                 )
 
         k_cached = torch.cat([k_cached, k], dim=1)
         v_cached = torch.cat([v_cached, v], dim=1)
         k_write_cached = torch.cat([k_write_cached, k_write], dim=1)
 
-        past_key_values.update(
-            recurrent_state=memory_state,
-            attn_state=(k.reshape(batch_size, 1, -1), v.reshape(batch_size, 1, -1), k_write.reshape(batch_size, 1, -1)),
-            layer_idx=self.layer_idx,
-            offset=1,
-            cache_kwargs=dict(window_size=self.window_size),
-        )
-
         k_window = k_cached.transpose(1, 2).contiguous()
         v_window = v_cached.transpose(1, 2).contiguous()
         q_t = q[:, 0].unsqueeze(2)
 
         use_memory = memory_state is not None and self._should_use_memory(seqlen_offset)
-
         if use_memory:
             o_local, lse_local = self._local_attention_step(q[:, 0], k_window, v_window)
-            attn_out = self._combine_memory_step(q[:, 0], o_local, lse_local, memory_state)
+            attn_out = self._combine_memory_step(
+                q[:, 0],
+                o_local,
+                lse_local,
+                memory_state,
+            )
             attn_out = attn_out.reshape(batch_size, 1, -1)
+            local_summary = self._collapse_local_summary(o_local)
         else:
             attn_out = F.scaled_dot_product_attention(q_t, k_window, v_window, is_causal=False)
             attn_out = attn_out.squeeze(2).reshape(batch_size, 1, -1)
+            local_summary = self._collapse_local_summary(attn_out.view(batch_size, self.num_heads, self.head_dim))
+
+        past_key_values.update(
+            recurrent_state=memory_state,
+            attn_state=(
+                k.reshape(batch_size, 1, -1),
+                v.reshape(batch_size, 1, -1),
+                k_write.reshape(batch_size, 1, -1),
+                local_summary.reshape(batch_size, 1, -1),
+            ),
+            layer_idx=self.layer_idx,
+            offset=1,
+            cache_kwargs=dict(window_size=self.window_size),
+        )
         return self.o_proj(attn_out), past_key_values
 
     def forward(
@@ -1585,7 +1848,7 @@ class GatedMemSWA(nn.Module):
 
         cu_seqlens = kwargs.get("cu_seqlens")
         if hidden_states.shape[1] > 1 and cache_len == 0:
-            out, memory_state, k, v, k_write = self._forward_fast(
+            out, memory_state, k, v, k_write, local_summary = self._forward_fast(
                 hidden_states,
                 attention_mask=attention_mask,
                 cu_seqlens=cu_seqlens,
@@ -1598,17 +1861,22 @@ class GatedMemSWA(nn.Module):
                 and k is not None
                 and v is not None
                 and k_write is not None
+                and local_summary is not None
             ):
                 window_k = [k[:, i] for i in range(max(0, k.shape[1] - self.window_size), k.shape[1])]
                 window_v = [v[:, i] for i in range(max(0, v.shape[1] - self.window_size), v.shape[1])]
                 window_k_write = [
                     k_write[:, i] for i in range(max(0, k_write.shape[1] - self.window_size), k_write.shape[1])
                 ]
+                window_local_summary = [
+                    local_summary[:, i] for i in range(max(0, local_summary.shape[1] - self.window_size), local_summary.shape[1])
+                ]
                 k_flat, v_flat = self._pack_cache_state(window_k, window_v)
                 k_write_flat, _ = self._pack_cache_state(window_k_write, window_k_write)
+                local_summary_flat, _ = self._pack_cache_state(window_local_summary, window_local_summary)
                 past_key_values.update(
                     recurrent_state=memory_state,
-                    attn_state=(k_flat, v_flat, k_write_flat),
+                    attn_state=(k_flat, v_flat, k_write_flat, local_summary_flat),
                     layer_idx=self.layer_idx,
                     offset=hidden_states.shape[1],
                     cache_kwargs=dict(window_size=self.window_size),
@@ -1620,14 +1888,14 @@ class GatedMemSWA(nn.Module):
             out, past_key_values = self._forward_cached(hidden_states, past_key_values, seqlen_offset=seqlen_offset)
             return out, None, past_key_values
 
-        memory_state, window_k, window_v, window_k_write = self._prepare_cache_state(
+        memory_state, window_k, window_v, window_k_write, window_local_summary = self._prepare_cache_state(
             past_key_values if use_cache else None,
             hidden_states.shape[0],
             hidden_states.device,
             hidden_states.dtype,
         )
         seqlen_offset = past_key_values.get_seq_length(self.layer_idx) if use_cache and past_key_values is not None else 0
-        out, memory_state, window_k, window_v, window_k_write = self._forward_full(
+        out, memory_state, window_k, window_v, window_k_write, window_local_summary = self._forward_full(
             hidden_states,
             attention_mask=attention_mask,
             seqlen_offset=seqlen_offset,
@@ -1635,6 +1903,7 @@ class GatedMemSWA(nn.Module):
             window_k=window_k,
             window_v=window_v,
             window_k_write=window_k_write,
+            window_local_summary=window_local_summary,
         )
 
         if use_cache and past_key_values is not None:
@@ -1648,9 +1917,14 @@ class GatedMemSWA(nn.Module):
                 window_k_write,
                 recent_tokens=min(hidden_states.shape[1], self.window_size),
             )
+            local_summary_flat, _ = self._pack_cache_state(
+                window_local_summary,
+                window_local_summary,
+                recent_tokens=min(hidden_states.shape[1], self.window_size),
+            )
             past_key_values.update(
                 recurrent_state=memory_state,
-                attn_state=(k_flat, v_flat, k_write_flat),
+                attn_state=(k_flat, v_flat, k_write_flat, local_summary_flat),
                 layer_idx=self.layer_idx,
                 offset=hidden_states.shape[1],
                 cache_kwargs=dict(window_size=self.window_size),
@@ -1669,13 +1943,9 @@ class GatedMemSWA(nn.Module):
 
         batch_size = x_t.shape[0]
         if kv_cache is None:
-            kv_cache = {"k": None, "v": None, "idx": 0, "filled": 0, "seen": 0}
+            kv_cache = {"k": None, "v": None, "s": None, "idx": 0, "filled": 0, "seen": 0}
         if self.memory_enabled and memory_state is None:
-            memory_state = torch.zeros(
-                (batch_size, self.num_kv_heads, self.num_mem_slots, self.head_dim),
-                device=x_t.device,
-                dtype=x_t.dtype,
-            )
+            memory_state = self._new_memory_state(batch_size, device=x_t.device, dtype=x_t.dtype)
 
         q = self.q_proj(x_t).view(batch_size, 1, self.num_heads, self.head_dim)
         k = self.k_proj(x_t).view(batch_size, 1, self.num_kv_heads, self.head_dim)
@@ -1693,16 +1963,22 @@ class GatedMemSWA(nn.Module):
                 dtype=x_t.dtype,
             )
             kv_cache["v"] = torch.zeros_like(kv_cache["k"])
+            kv_cache["s"] = torch.zeros(
+                (batch_size, self.window_size, self.num_kv_heads, self.head_dim),
+                device=x_t.device,
+                dtype=x_t.dtype,
+            )
 
         if kv_cache["filled"] >= self.window_size and self.memory_enabled:
             evicted_k = kv_cache["k"][:, kv_cache["idx"]]
             evicted_v = kv_cache["v"][:, kv_cache["idx"]]
+            evicted_summary = kv_cache["s"][:, kv_cache["idx"]]
             if self._should_update_memory(seqlen_offset):
                 memory_state = self._update_memory(
                     memory_state,
                     self._collapse_query_groups(evicted_k),
                     self._collapse_query_groups(evicted_v),
-                    x_t[:, 0],
+                    local_summary=evicted_summary,
                 )
 
         kv_cache["k"][:, kv_cache["idx"]] = k[:, 0]
@@ -1721,12 +1997,19 @@ class GatedMemSWA(nn.Module):
 
         q_t = q[:, 0].unsqueeze(2)
         use_memory = memory_state is not None and self._should_use_memory(seqlen_offset)
-
         if use_memory:
             o_local, lse_local = self._local_attention_step(q[:, 0], k_seq, v_seq)
-            attn_out = self._combine_memory_step(q[:, 0], o_local, lse_local, memory_state)
+            attn_out = self._combine_memory_step(
+                q[:, 0],
+                o_local,
+                lse_local,
+                memory_state,
+            )
             attn_out = attn_out.reshape(batch_size, 1, -1)
+            local_summary = self._collapse_local_summary(o_local)
         else:
             attn_out = F.scaled_dot_product_attention(q_t, k_seq, v_seq, is_causal=False)
             attn_out = attn_out.squeeze(2).reshape(batch_size, 1, -1)
+            local_summary = self._collapse_local_summary(attn_out.view(batch_size, self.num_heads, self.head_dim))
+        kv_cache["s"][:, (kv_cache["idx"] - 1) % self.window_size] = local_summary
         return self.o_proj(attn_out), kv_cache, memory_state

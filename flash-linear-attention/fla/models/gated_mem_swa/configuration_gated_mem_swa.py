@@ -19,7 +19,10 @@ class GatedMemSWAConfig(PretrainedConfig):
         window_size: int = 4096,
         rope_theta: float = 10000.0,
         max_position_embeddings: int = 2048,
-        num_mem_slots: int = 1,
+        num_mem_slots: int | None = None,
+        num_memory_components: int | None = None,
+        use_memory_component: bool | None = None,
+        memory_state_rank: int | None = None,
         mem_scale: float = 1.0,
         mem_rank: int | None = None,
         mem_proj_mode: str = "linear",
@@ -57,7 +60,28 @@ class GatedMemSWAConfig(PretrainedConfig):
         self.window_size = window_size
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        self.num_mem_slots = num_mem_slots
+        explicit_num_memory_components = num_memory_components
+        explicit_num_mem_slots = num_mem_slots
+        if num_memory_components is None:
+            num_memory_components = 1 if num_mem_slots is None else num_mem_slots
+        elif num_mem_slots is not None and num_mem_slots != num_memory_components:
+            raise ValueError("`num_mem_slots` and `num_memory_components` must match when both are provided.")
+        if use_memory_component is None:
+            use_memory_component = num_memory_components > 0
+        elif (
+            not use_memory_component
+            and explicit_num_memory_components not in {0, None}
+            and explicit_num_mem_slots not in {0, None}
+        ):
+            raise ValueError("`use_memory_component=False` is incompatible with a positive memory component count.")
+        if not use_memory_component:
+            num_memory_components = 0
+        self.num_memory_components = num_memory_components
+        self.use_memory_component = use_memory_component
+        # Keep the legacy config field for backward compatibility with older
+        # checkpoints and training scripts.
+        self.num_mem_slots = num_memory_components
+        self.memory_state_rank = memory_state_rank
         self.mem_scale = mem_scale
         self.mem_rank = mem_rank
         self.mem_proj_mode = mem_proj_mode
