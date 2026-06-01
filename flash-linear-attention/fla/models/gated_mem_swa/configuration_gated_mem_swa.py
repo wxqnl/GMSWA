@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 import warnings
 
@@ -5,6 +6,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class GatedMemSWAConfig(PretrainedConfig):
+    """Configuration for the GM-SWA v2 model (paper/gmswa_v2_design.md)."""
 
     model_type = "gated_mem_swa"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -15,25 +17,20 @@ class GatedMemSWAConfig(PretrainedConfig):
         num_hidden_layers: int = 24,
         num_heads: int = 32,
         num_kv_heads: int | None = None,
-        qkv_bias: bool = True,
-        window_size: int = 4096,
+        qkv_bias: bool = False,
+        window_size: int = 512,
         rope_theta: float = 10000.0,
         max_position_embeddings: int = 2048,
-        num_mem_slots: int | None = None,
-        num_memory_components: int | None = None,
-        use_memory_component: bool | None = None,
-        memory_state_rank: int | None = None,
-        mem_scale: float = 1.0,
-        mem_rank: int | None = None,
-        mem_proj_mode: str = "linear",
-        mem_gate_mode: str = "linear",
-        mem_update_source: str = "kv",
-        mem_update_stride: int = 1,
-        mem_token_threshold: int | None = None,
+        # ---- v2 memory branch ----
         disable_memory: bool = False,
-        gate_bias_init: float = 1.0,
-        mem_norm: bool = True,
-        mem_norm_eps: float = 1e-6,
+        mem_gate_logit_bias: float = -2.0,
+        mix_gate_logit_bias: float = 4.0,
+        a_log_init_lo: float = 1.0,
+        a_log_init_hi: float = 16.0,
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_floor: float = 1e-4,
+        # ---- MLP / norm / fuse ----
         hidden_ratio: int | None = 4,
         intermediate_size: int | None = None,
         hidden_act: str = "swish",
@@ -60,39 +57,15 @@ class GatedMemSWAConfig(PretrainedConfig):
         self.window_size = window_size
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        explicit_num_memory_components = num_memory_components
-        explicit_num_mem_slots = num_mem_slots
-        if num_memory_components is None:
-            num_memory_components = 1 if num_mem_slots is None else num_mem_slots
-        elif num_mem_slots is not None and num_mem_slots != num_memory_components:
-            raise ValueError("`num_mem_slots` and `num_memory_components` must match when both are provided.")
-        if use_memory_component is None:
-            use_memory_component = num_memory_components > 0
-        elif (
-            not use_memory_component
-            and explicit_num_memory_components not in {0, None}
-            and explicit_num_mem_slots not in {0, None}
-        ):
-            raise ValueError("`use_memory_component=False` is incompatible with a positive memory component count.")
-        if not use_memory_component:
-            num_memory_components = 0
-        self.num_memory_components = num_memory_components
-        self.use_memory_component = use_memory_component
-        # Keep the legacy config field for backward compatibility with older
-        # checkpoints and training scripts.
-        self.num_mem_slots = num_memory_components
-        self.memory_state_rank = memory_state_rank
-        self.mem_scale = mem_scale
-        self.mem_rank = mem_rank
-        self.mem_proj_mode = mem_proj_mode
-        self.mem_gate_mode = mem_gate_mode
-        self.mem_update_source = mem_update_source
-        self.mem_update_stride = mem_update_stride
-        self.mem_token_threshold = mem_token_threshold
+
         self.disable_memory = disable_memory
-        self.gate_bias_init = gate_bias_init
-        self.mem_norm = mem_norm
-        self.mem_norm_eps = mem_norm_eps
+        self.mem_gate_logit_bias = mem_gate_logit_bias
+        self.mix_gate_logit_bias = mix_gate_logit_bias
+        self.a_log_init_lo = a_log_init_lo
+        self.a_log_init_hi = a_log_init_hi
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_floor = dt_init_floor
 
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
@@ -109,15 +82,31 @@ class GatedMemSWAConfig(PretrainedConfig):
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
+        # Silently ignore obsolete v1 fields so old checkpoints still load.
+        _legacy = (
+            "num_mem_slots", "num_memory_components", "use_memory_component",
+            "memory_state_rank", "mem_scale", "mem_rank", "mem_proj_mode",
+            "mem_gate_mode", "mem_update_source", "mem_update_stride",
+            "mem_token_threshold", "gate_bias_init", "mem_norm", "mem_norm_eps",
+        )
+        legacy_present = [k for k in _legacy if k in kwargs]
+        if legacy_present:
+            warnings.warn(
+                "Ignoring obsolete v1 GM-SWA config fields: "
+                f"{', '.join(legacy_present)}. See paper/gmswa_v2_design.md."
+            )
+            for k in legacy_present:
+                kwargs.pop(k, None)
+
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
             )
         if fuse_linear_cross_entropy:
             warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
+                "`fuse_linear_cross_entropy` is enabled, which can improve memory efficiency "
                 "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
+                "If you observe issues like loss divergence, consider disabling this setting."
             )
 
         super().__init__(

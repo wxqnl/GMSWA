@@ -27,13 +27,16 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
 # Make fla discoverable so its custom model_types register.
 export PYTHONPATH="$ROOT/flash-linear-attention:${PYTHONPATH:-}"
+# Custom FLA model_types (e.g. gated_mem_swa) only register on `import fla`,
+# which plain `python -m lm_eval` never does — go through the launcher shim.
+LM_EVAL=("$PYTHON" "$ROOT/scripts/lm_eval_fla.py")
 
 echo "=== EVAL  $RUN_NAME ==="
 echo "  short tasks: $SHORT_TASKS"
 echo "  long  tasks: $LONG_TASKS"
 
 # --- short-context tasks -----------------------------------------------------
-$PYTHON -m lm_eval \
+"${LM_EVAL[@]}" \
   --model hf \
   --model_args "pretrained=${MODEL_PATH},dtype=bfloat16,trust_remote_code=True" \
   --tasks "$SHORT_TASKS" \
@@ -42,7 +45,7 @@ $PYTHON -m lm_eval \
   2>&1 | tee "$EVAL_DIR/short.log"
 
 # --- long-context tasks (small batch for memory) -----------------------------
-$PYTHON -m lm_eval \
+"${LM_EVAL[@]}" \
   --model hf \
   --model_args "pretrained=${MODEL_PATH},dtype=bfloat16,trust_remote_code=True,max_length=8192" \
   --tasks "$LONG_TASKS" \
