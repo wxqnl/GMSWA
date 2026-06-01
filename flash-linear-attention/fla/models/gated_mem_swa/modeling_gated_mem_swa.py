@@ -46,20 +46,14 @@ class GatedMemSWABlock(GradientCheckpointingLayer):
             window_size=config.window_size,
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
-            num_memory_components=getattr(config, "num_memory_components", getattr(config, "num_mem_slots", 1)),
-            use_memory_component=getattr(config, "use_memory_component", None),
-            memory_state_rank=getattr(config, "memory_state_rank", None),
-            mem_scale=config.mem_scale,
-            mem_rank=getattr(config, "mem_rank", None),
-            mem_proj_mode=getattr(config, "mem_proj_mode", "linear"),
-            mem_gate_mode=getattr(config, "mem_gate_mode", "linear"),
-            mem_update_source=getattr(config, "mem_update_source", "kv"),
-            mem_update_stride=getattr(config, "mem_update_stride", 1),
-            mem_token_threshold=getattr(config, "mem_token_threshold", None),
             disable_memory=getattr(config, "disable_memory", False),
-            gate_bias_init=config.gate_bias_init,
-            mem_norm=config.mem_norm,
-            mem_norm_eps=config.mem_norm_eps,
+            mem_gate_logit_bias=getattr(config, "mem_gate_logit_bias", -2.0),
+            mix_gate_logit_bias=getattr(config, "mix_gate_logit_bias", 4.0),
+            a_log_init_lo=getattr(config, "a_log_init_lo", 1.0),
+            a_log_init_hi=getattr(config, "a_log_init_hi", 16.0),
+            dt_min=getattr(config, "dt_min", 0.001),
+            dt_max=getattr(config, "dt_max", 0.1),
+            dt_init_floor=getattr(config, "dt_init_floor", 0.0001),
             layer_idx=layer_idx,
         )
 
@@ -122,7 +116,9 @@ class GatedMemSWAPreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = False,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
+        if isinstance(module, GatedMemSWA):
+            module.reset_memory_parameters()
+        elif isinstance(module, (nn.Linear, nn.Conv1d)):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)

@@ -20,7 +20,7 @@
 # Paths (override as env vars if your layout differs):
 #   ROOT                  default /home/user01/Minko/GMSWA
 #   TOKENIZER             default /home/user01/Minko/models/gla-tokenizer
-#   DATASET               default /home/user01/Minko/datasets/fineweb_edu_100BT
+#   DATASET               default /mnt/data/wuwei/data/fineweb-edu-100BT-parquet-sharded
 
 set -euo pipefail
 
@@ -37,9 +37,11 @@ ROOT=${ROOT:-/home/user01/Minko/GMSWA}
 FLA=$ROOT/flash-linear-attention
 FLAME=$FLA/flame
 TOKENIZER=${TOKENIZER:-/home/user01/Minko/models/gla-tokenizer}
-DATASET=${DATASET:-/home/user01/Minko/datasets/fineweb_edu_100BT}
+DATASET=${DATASET:-/mnt/data/wuwei/data/fineweb-edu-100BT-parquet-sharded}
 NGPU=${NGPU:-8}
 WANDB=${WANDB:-1}
+NUM_WORKERS=${NUM_WORKERS:-0}
+PREFETCH_FACTOR=${PREFETCH_FACTOR:-2}
 
 # Use the repository checkout so newly-added local model types are registered.
 export PYTHONPATH="$FLA:${PYTHONPATH:-}"
@@ -57,7 +59,7 @@ mkdir -p "$EVAL_DIR"
 # ---------- per-scale hyperparameters ----------
 case "$SCALE" in
   340M)
-    LR=7e-4;   WARMUP=5000;   LR_MIN=7e-5;  STEPS=50000;  CKPT_INTERVAL=5000
+    LR=7e-4;   WARMUP=1000;   LR_MIN=7e-5;  STEPS=10000;  CKPT_INTERVAL=5000
     SEQ_LEN=32768; GRAD_ACCUM=4 ;;
   1B)
     LR=1e-3;   WARMUP=10000;  LR_MIN=1e-4;  STEPS=100000; CKPT_INTERVAL=10000
@@ -111,8 +113,8 @@ if [[ "${SKIP_TRAIN:-0}" != "1" ]]; then
     --checkpoint.interval "$CKPT_INTERVAL" \
     --metrics.log_freq 1 \
     --checkpoint.folder checkpoint \
-    --training.num_workers 8 \
-    --training.prefetch_factor 2 \
+    --training.num_workers "$NUM_WORKERS" \
+    --training.prefetch_factor "$PREFETCH_FACTOR" \
     --checkpoint.export_dtype bfloat16 \
     --checkpoint.enable_checkpoint \
     --checkpoint.load_step "$LOAD_STEP" \

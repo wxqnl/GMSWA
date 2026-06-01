@@ -1,9 +1,11 @@
 .venv/
+.venv311/
 .vscode/
 __pycache__/
 .pytest_cache/
 
 logs/
+eval_results/
 
 *.log
 *.out

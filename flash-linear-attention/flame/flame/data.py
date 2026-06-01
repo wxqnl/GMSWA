@@ -557,8 +557,8 @@ class ParallelAwareDataLoader(StatefulDataLoader, Stateful):
             collate_fn=collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            prefetch_factor=prefetch_factor,
-            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
+            persistent_workers=persistent_workers if num_workers > 0 else False,
             snapshot_every_n_steps=snapshot_every_n_steps,
         )
         self.rank = rank
@@ -633,7 +633,7 @@ def build_dataset(
                 dataset = dataset.to_iterable_dataset(num_shards=min_num_shards)
             else:
                 if seed is not None:
-                    dataset = shuffle(dataset, seed=seed)
+                    dataset = dataset.shuffle(seed=seed, buffer_size=1024)
     else:
         datasets = [item.strip() for item in dataset.split(",")]
         if dataset_name is not None:
@@ -734,7 +734,7 @@ def build_dataset(
                 else:
                     # we set relatively small buffer size here as interleaving could provide some randomness
                     if seed is not None:
-                        subset = shuffle(subset, seed=seed, buffer_size=max(128, 1024 // len(datasets)))
+                        subset = subset.shuffle(seed=seed, buffer_size=max(128, 1024 // len(datasets)))
 
             subset = _select_text_column(subset, datasets[i])
             subsets.append(subset)

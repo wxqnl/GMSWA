@@ -15,6 +15,8 @@ EVAL_DIR=${3:?"usage: eval_one.sh <run_name> <model_path> <eval_dir>"}
 
 SHORT_TASKS=${SHORT_TASKS:-"piqa,openbookqa,hellaswag,arc_easy,arc_challenge,wikitext"}
 LONG_TASKS=${LONG_TASKS:-"longbench_hotpotqa,longbench_qasper,niah_single_2"}
+SHORT_BATCH_SIZE=${SHORT_BATCH_SIZE:-8}
+LONG_BATCH_SIZE=${LONG_BATCH_SIZE:-1}
 
 mkdir -p "$EVAL_DIR"
 
@@ -33,21 +35,23 @@ echo "  short tasks: $SHORT_TASKS"
 echo "  long  tasks: $LONG_TASKS"
 
 # --- short-context tasks -----------------------------------------------------
-$PYTHON -m lm_eval \
+$PYTHON "$ROOT/scripts/lm_eval_with_fla.py" \
   --model hf \
   --model_args "pretrained=${MODEL_PATH},dtype=bfloat16,trust_remote_code=True" \
   --tasks "$SHORT_TASKS" \
-  --batch_size auto:4 \
+  --batch_size "$SHORT_BATCH_SIZE" \
   --output_path "$EVAL_DIR/short.json" \
   2>&1 | tee "$EVAL_DIR/short.log"
 
 # --- long-context tasks (small batch for memory) -----------------------------
-$PYTHON -m lm_eval \
-  --model hf \
-  --model_args "pretrained=${MODEL_PATH},dtype=bfloat16,trust_remote_code=True,max_length=8192" \
-  --tasks "$LONG_TASKS" \
-  --batch_size 1 \
-  --output_path "$EVAL_DIR/long.json" \
-  2>&1 | tee "$EVAL_DIR/long.log" || true   # don't abort whole run on a long-eval failure
+if [[ -n "$LONG_TASKS" && "$LONG_TASKS" != "__none__" && "$LONG_TASKS" != "none" ]]; then
+  $PYTHON "$ROOT/scripts/lm_eval_with_fla.py" \
+    --model hf \
+    --model_args "pretrained=${MODEL_PATH},dtype=bfloat16,trust_remote_code=True,max_length=8192" \
+    --tasks "$LONG_TASKS" \
+    --batch_size "$LONG_BATCH_SIZE" \
+    --output_path "$EVAL_DIR/long.json" \
+    2>&1 | tee "$EVAL_DIR/long.log" || true   # don't abort whole run on a long-eval failure
+fi
 
 echo "DONE: eval results at $EVAL_DIR"
