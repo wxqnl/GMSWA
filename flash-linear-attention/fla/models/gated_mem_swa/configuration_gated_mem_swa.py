@@ -23,6 +23,14 @@ class GatedMemSWAConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         # ---- v2 memory branch ----
         disable_memory: bool = False,
+        disable_local: bool = False,
+        mem_separate_proj: bool = False,
+        mem_evicted_only: bool = True,
+        mem_use_short_conv: bool = False,
+        mem_conv_size: int = 4,
+        mem_use_output_norm: bool = False,
+        mem_swa_drop_prob: float = 0.0,
+        mem_swa_drop_anneal_steps: int = 0,
         mem_gate_logit_bias: float = -2.0,
         mix_gate_logit_bias: float = 4.0,
         a_log_init_lo: float = 1.0,
@@ -59,6 +67,14 @@ class GatedMemSWAConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
 
         self.disable_memory = disable_memory
+        self.disable_local = disable_local
+        self.mem_separate_proj = mem_separate_proj
+        self.mem_evicted_only = mem_evicted_only
+        self.mem_use_short_conv = mem_use_short_conv
+        self.mem_conv_size = mem_conv_size
+        self.mem_use_output_norm = mem_use_output_norm
+        self.mem_swa_drop_prob = mem_swa_drop_prob
+        self.mem_swa_drop_anneal_steps = mem_swa_drop_anneal_steps
         self.mem_gate_logit_bias = mem_gate_logit_bias
         self.mix_gate_logit_bias = mix_gate_logit_bias
         self.a_log_init_lo = a_log_init_lo

@@ -1,0 +1,17 @@
+[Fri Jun  5 04:29:44 AM EDT 2026] waiting for bighead training (step-10000 checkpoint)...
+[Fri Jun  5 09:00:15 AM EDT 2026] training done -> converting DCP->HF
+🚨 Config not found for qwen2-semarope. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for qwen2-semarope. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for qwen2-semarope. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[Fri Jun  5 09:00:41 AM EDT 2026] loss-vs-position
+[Fri Jun  5 09:01:04 AM EDT 2026] NIAH sweep + recall (8 GPUs)
+[Fri Jun  5 09:01:04 AM EDT 2026] ===== GMSWA-v9curr =====
+[Fri Jun  5 09:01:04 AM EDT 2026] GMSWA-v9curr NIAH @ 512
+[Fri Jun  5 09:06:35 AM EDT 2026] GMSWA-v9curr NIAH @ 1024
+[Fri Jun  5 09:12:22 AM EDT 2026] GMSWA-v9curr NIAH @ 2048
+[Fri Jun  5 09:18:13 AM EDT 2026] GMSWA-v9curr NIAH @ 4096
+[Fri Jun  5 09:24:07 AM EDT 2026] GMSWA-v9curr NIAH @ 8192
+[Fri Jun  5 09:30:15 AM EDT 2026] GMSWA-v9curr recall-real
+[Fri Jun  5 09:32:37 AM EDT 2026] EVAL SUITE DONE. disk:  624G
+run_eval_v9curr.sh: line 34: /home/user01/Minko/GMSWA/eval_results/GMSWA-340M-v9curr-10k/short.log: No such file or directory
+[Fri Jun  5 09:32:53 AM EDT 2026] V9CURR EVAL DONE

@@ -1,0 +1,6 @@
+[Wed Jun  3 10:31:27 PM EDT 2026] waiting for v7 eval to finish...
+[Thu Jun  4 03:09:58 AM EDT 2026] ===== backfill standard short-bench =====
+[Thu Jun  4 03:09:58 AM EDT 2026] GMSWA-340M-v5conv-10k short-bench
+[Thu Jun  4 03:12:17 AM EDT 2026] GMSWA-340M-v6onorm-10k short-bench
+[Thu Jun  4 03:14:27 AM EDT 2026] GMSWA-340M-v7drop-10k short-bench
+[Thu Jun  4 03:16:15 AM EDT 2026] BACKFILL SHORT DONE

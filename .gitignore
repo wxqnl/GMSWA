@@ -27,3 +27,8 @@ flash-linear-attention/dist/
 flash-linear-attention/*.egg-info/
 flash-linear-attention/.pytest_cache/
 flash-linear-attention/tmp_*.py
+
+# local agent/editor config, vendored skills, and session dumps (not project content)
+.claude/
+tools/
+gmswa.txt

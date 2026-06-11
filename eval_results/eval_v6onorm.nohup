@@ -1,0 +1,17 @@
+[Wed Jun  3 04:22:49 PM EDT 2026] waiting for bighead training (step-10000 checkpoint)...
+[Wed Jun  3 09:05:19 PM EDT 2026] training done -> converting DCP->HF
+🚨 Config not found for qwen2-semarope. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for qwen2-semarope. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+🚨 Config not found for qwen2-semarope. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[Wed Jun  3 09:05:47 PM EDT 2026] loss-vs-position
+[Wed Jun  3 09:06:12 PM EDT 2026] NIAH sweep + recall (8 GPUs)
+[Wed Jun  3 09:06:12 PM EDT 2026] ===== GMSWA-v6onorm =====
+[Wed Jun  3 09:06:12 PM EDT 2026] GMSWA-v6onorm NIAH @ 512
+[Wed Jun  3 09:12:12 PM EDT 2026] GMSWA-v6onorm NIAH @ 1024
+[Wed Jun  3 09:18:28 PM EDT 2026] GMSWA-v6onorm NIAH @ 2048
+[Wed Jun  3 09:24:46 PM EDT 2026] GMSWA-v6onorm NIAH @ 4096
+[Wed Jun  3 09:31:03 PM EDT 2026] GMSWA-v6onorm NIAH @ 8192
+[Wed Jun  3 09:37:33 PM EDT 2026] GMSWA-v6onorm recall-real
+[Wed Jun  3 09:40:34 PM EDT 2026] EVAL SUITE DONE. disk:   30G
+run_eval_v6onorm.sh: line 34: /home/user01/Minko/GMSWA/eval_results/GMSWA-340M-v6onorm-10k/short.log: No such file or directory
+[Wed Jun  3 09:40:49 PM EDT 2026] V6ONORM EVAL DONE

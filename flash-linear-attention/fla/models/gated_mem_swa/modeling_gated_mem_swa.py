@@ -47,6 +47,13 @@ class GatedMemSWABlock(GradientCheckpointingLayer):
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
             disable_memory=config.disable_memory,
+            disable_local=getattr(config, "disable_local", False),
+            mem_separate_proj=config.mem_separate_proj,
+            mem_evicted_only=config.mem_evicted_only,
+            mem_use_short_conv=getattr(config, "mem_use_short_conv", False),
+            mem_conv_size=getattr(config, "mem_conv_size", 4),
+            mem_use_output_norm=getattr(config, "mem_use_output_norm", False),
+            mem_swa_drop_prob=getattr(config, "mem_swa_drop_prob", 0.0),
             mem_gate_logit_bias=config.mem_gate_logit_bias,
             mix_gate_logit_bias=config.mix_gate_logit_bias,
             a_log_init_lo=config.a_log_init_lo,
@@ -190,6 +197,15 @@ class GatedMemSWAModel(GatedMemSWAPreTrainedModel):
 
         self.gradient_checkpointing = False
 
+        # Memory-first curriculum: anneal the SWA-drop prob from its start value to
+        # 0 over the first `mem_swa_drop_anneal_steps` training forwards, so the
+        # recurrent memory is forced to learn sharp recall alone early, then the
+        # hybrid converges normally. Counter lives here (outside the checkpointed
+        # block) so activation-checkpoint recompute stays consistent.
+        self._mem_drop_p0 = float(getattr(config, "mem_swa_drop_prob", 0.0))
+        self._mem_drop_anneal = int(getattr(config, "mem_swa_drop_anneal_steps", 0))
+        self._mem_drop_step = 0
+
         self.post_init()
 
     def get_input_embeddings(self):
@@ -235,6 +251,13 @@ class GatedMemSWAModel(GatedMemSWAPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
+
+        # memory-first curriculum: set this step's annealed SWA-drop prob on each layer
+        if self.training and self._mem_drop_anneal > 0:
+            eff_p = self._mem_drop_p0 * max(0.0, 1.0 - self._mem_drop_step / self._mem_drop_anneal)
+            for _l in self.layers:
+                _l.attn._runtime_drop_p = eff_p
+            self._mem_drop_step += 1
 
         for layer in self.layers:
             if output_hidden_states:

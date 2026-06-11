@@ -1,0 +1,116 @@
+\begin{thebibliography}{19}
+\providecommand{\natexlab}[1]{#1}
+
+\bibitem[{Arora et~al.(2023)Arora, Eyuboglu, Timalsina
+  et~al.}]{arora2023zoology}
+Arora, S.; Eyuboglu, S.; Timalsina, A.; et~al. 2023.
+\newblock Zoology: Measuring and Improving Recall in Efficient Language Models.
+\newblock \emph{arXiv preprint arXiv:2312.04927}.
+
+\bibitem[{Arora et~al.(2024)Arora, Eyuboglu, Zhang et~al.}]{arora2024based}
+Arora, S.; Eyuboglu, S.; Zhang, M.; et~al. 2024.
+\newblock Simple Linear Attention Language Models Balance the Recall-Throughput
+  Tradeoff.
+\newblock \emph{arXiv preprint arXiv:2402.18668}.
+
+\bibitem[{{Authors to be verified}(2025)}]{swax2025}
+{Authors to be verified}. 2025.
+\newblock {SWAX}: Sliding-Window Attention with Linear-Attention Memory.
+\newblock \emph{arXiv preprint arXiv:2509.24552}.
+\newblock ArXiv ID and authorship to be verified before submission.
+
+\bibitem[{Beltagy, Peters, and Cohan(2020)}]{beltagy2020longformer}
+Beltagy, I.; Peters, M.~E.; and Cohan, A. 2020.
+\newblock Longformer: The Long-Document Transformer.
+\newblock \emph{arXiv preprint arXiv:2004.05150}.
+
+\bibitem[{Botev et~al.(2024)Botev, De, Smith et~al.}]{botev2024recurrentgemma}
+Botev, A.; De, S.; Smith, S.~L.; et~al. 2024.
+\newblock RecurrentGemma: Moving Past Transformers for Efficient Open Language
+  Models.
+\newblock \emph{arXiv preprint arXiv:2404.07839}.
+
+\bibitem[{Dao and Gu(2024)}]{dao2024mamba2}
+Dao, T.; and Gu, A. 2024.
+\newblock Transformers are {SSM}s: Generalized Models and Efficient Algorithms
+  Through Structured State Space Duality.
+\newblock In \emph{International Conference on Machine Learning (ICML)}.
+
+\bibitem[{De et~al.(2024)De, Smith, Fernando et~al.}]{de2024griffin}
+De, S.; Smith, S.~L.; Fernando, A.; et~al. 2024.
+\newblock Griffin: Mixing Gated Linear Recurrences with Local Attention for
+  Efficient Language Models.
+\newblock \emph{arXiv preprint arXiv:2402.19427}.
+
+\bibitem[{Dong et~al.(2024)Dong, Fu, Diao et~al.}]{dong2024hymba}
+Dong, X.; Fu, Y.; Diao, S.; et~al. 2024.
+\newblock Hymba: A Hybrid-head Architecture for Small Language Models.
+\newblock \emph{arXiv preprint arXiv:2411.13676}.
+
+\bibitem[{Glorioso et~al.(2024)Glorioso, Anthony, Tokpanov
+  et~al.}]{glorioso2024zamba}
+Glorioso, P.; Anthony, Q.; Tokpanov, Y.; et~al. 2024.
+\newblock Zamba: A Compact 7B SSM Hybrid Model.
+\newblock \emph{arXiv preprint arXiv:2405.16712}.
+
+\bibitem[{Gu and Dao(2023)}]{gu2023mamba}
+Gu, A.; and Dao, T. 2023.
+\newblock Mamba: Linear-Time Sequence Modeling with Selective State Spaces.
+\newblock \emph{arXiv preprint arXiv:2312.00752}.
+
+\bibitem[{Hsieh et~al.(2024)Hsieh, Sun, Kriman et~al.}]{hsieh2024ruler}
+Hsieh, C.-P.; Sun, S.; Kriman, S.; et~al. 2024.
+\newblock {RULER}: What's the Real Context Size of Your Long-Context Language
+  Models?
+\newblock \emph{arXiv preprint arXiv:2404.06654}.
+
+\bibitem[{Jiang et~al.(2023)Jiang, Sablayrolles, Mensch
+  et~al.}]{jiang2023mistral}
+Jiang, A.~Q.; Sablayrolles, A.; Mensch, A.; et~al. 2023.
+\newblock Mistral 7B.
+\newblock \emph{arXiv preprint arXiv:2310.06825}.
+
+\bibitem[{Katharopoulos et~al.(2020)Katharopoulos, Vyas, Pappas, and
+  Fleuret}]{katharopoulos2020transformers}
+Katharopoulos, A.; Vyas, A.; Pappas, N.; and Fleuret, F. 2020.
+\newblock Transformers are {RNN}s: Fast Autoregressive Transformers with Linear
+  Attention.
+\newblock In \emph{International Conference on Machine Learning (ICML)}.
+
+\bibitem[{Lieber et~al.(2024)Lieber, Lenz, Bata et~al.}]{lieber2024jamba}
+Lieber, O.; Lenz, B.; Bata, H.; et~al. 2024.
+\newblock Jamba: A Hybrid Transformer-Mamba Language Model.
+\newblock \emph{arXiv preprint arXiv:2403.19887}.
+
+\bibitem[{Ren et~al.(2024)Ren, Liu, Lu et~al.}]{ren2024samba}
+Ren, L.; Liu, Y.; Lu, Y.; et~al. 2024.
+\newblock Samba: Simple Hybrid State Space Models for Efficient Unlimited
+  Context Language Modeling.
+\newblock \emph{arXiv preprint arXiv:2406.07522}.
+
+\bibitem[{Sun et~al.(2024)Sun, Dong, Zhu et~al.}]{sun2024yoco}
+Sun, Y.; Dong, L.; Zhu, Y.; et~al. 2024.
+\newblock You Only Cache Once: Decoder-Decoder Architectures for Language
+  Models.
+\newblock \emph{arXiv preprint arXiv:2405.05254}.
+
+\bibitem[{Yang, Kautz, and Hatamizadeh(2024)}]{yang2024gateddeltanet}
+Yang, S.; Kautz, J.; and Hatamizadeh, A. 2024.
+\newblock Gated Delta Networks: Improving Mamba2 with Delta Rule.
+\newblock \emph{arXiv preprint arXiv:2412.06464}.
+
+\bibitem[{Yang et~al.(2024)Yang, Wang, Zhang et~al.}]{yang2024deltanet}
+Yang, S.; Wang, B.; Zhang, Y.; et~al. 2024.
+\newblock Parallelizing Linear Transformers with the Delta Rule over Sequence
+  Length.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}.
+
+\bibitem[{Zaheer et~al.(2020)Zaheer, Guruganesh, Dubey
+  et~al.}]{zaheer2020bigbird}
+Zaheer, M.; Guruganesh, G.; Dubey, A.; et~al. 2020.
+\newblock Big Bird: Transformers for Longer Sequences.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}.
+
+\end{thebibliography}

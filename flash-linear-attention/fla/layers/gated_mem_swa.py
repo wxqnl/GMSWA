@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 import warnings
 from typing import TYPE_CHECKING
 
@@ -11,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fla.modules import RotaryEmbedding
+from fla.modules import FusedRMSNormGated, RotaryEmbedding, ShortConvolution
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
@@ -58,6 +59,7 @@ class GatedMemSWA(nn.Module):
         rope_theta: float = 10000.0,
         max_position_embeddings: int | None = None,
         disable_memory: bool = False,
+        disable_local: bool = False,
         mem_gate_logit_bias: float = -2.0,
         mix_gate_logit_bias: float = 4.0,
         a_log_init_lo: float = 1.0,
@@ -65,6 +67,13 @@ class GatedMemSWA(nn.Module):
         dt_min: float = 0.001,
         dt_max: float = 0.1,
         dt_init_floor: float = 1e-4,
+        mem_separate_proj: bool = False,
+        mem_mode: str = "delta",
+        mem_evicted_only: bool = True,
+        mem_use_short_conv: bool = False,
+        mem_conv_size: int = 4,
+        mem_use_output_norm: bool = False,
+        mem_swa_drop_prob: float = 0.0,
         layer_idx: int | None = None,
     ) -> None:
         super().__init__()
@@ -87,6 +96,12 @@ class GatedMemSWA(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
         self.disable_memory = disable_memory
+        # Memory-only ablation: drop the SWA branch from the OUTPUT (o = o_mem),
+        # so the recurrent memory alone must predict. Used to test whether the
+        # memory CAN learn sharp recall when not pre-empted by the window
+        # (credit-assignment probe). The SWA branch is still computed to maintain
+        # the K/V ring the memory reads at decode; only the mix is bypassed.
+        self.disable_local = bool(disable_local) and not disable_memory
         self.mem_gate_logit_bias = float(mem_gate_logit_bias)
         self.mix_gate_logit_bias = float(mix_gate_logit_bias)
         self.a_log_init_lo = float(a_log_init_lo)
@@ -101,6 +116,24 @@ class GatedMemSWA(nn.Module):
         self.o_proj = nn.Linear(num_heads * self.head_dim, dim, bias=False)
 
         self.memory_enabled = not disable_memory
+        # When True, the memory branch gets its OWN content-retrieval q/k
+        # projections (NoPE), decoupled from the positional SWA q/k. This lets
+        # the memory learn addressing keys not bound to the local-attention
+        # projections. Value (v) is shared: it is the content to copy out.
+        self.mem_separate_proj = bool(mem_separate_proj) and self.memory_enabled
+        # "delta" = gated-delta-rule recurrent readout (v3). "softmax" = exact
+        # NoPE softmax retrieval over evicted (out-of-window) tokens (v4) — sharp
+        # retrieval that recovers discrete recall the linear readout cannot.
+        self.mem_mode = str(mem_mode)
+        # Complementary design (default): the memory ingests ONLY evicted tokens
+        # (those that left the window), so its constant state is spent on long-range
+        # content the window cannot see. False = memory on ALL tokens (overlaps the
+        # window) — the ablation for the complementary-decomposition claim.
+        self.mem_evicted_only = bool(mem_evicted_only)
+        # Stochastically drop the SWA branch during training (prob per forward) so
+        # the memory must carry the full prediction alone -> forced to learn the
+        # precise long-range recall the SWA shortcut otherwise hides. Inference: off.
+        self.mem_swa_drop_prob = float(mem_swa_drop_prob)
         # `beta_proj` is exposed as None: the write-gate beta is produced by the
         # fused `gate_proj` (no separate Linear). Kept as an attribute so callers
         # can assert `layer.beta_proj is None` for disable_memory mode.
@@ -113,6 +146,40 @@ class GatedMemSWA(nn.Module):
             self.gate_proj = None
             self.A_log = None
             self.dt_bias = None
+        if self.mem_separate_proj:
+            self.mem_q_proj = nn.Linear(dim, num_heads * self.head_dim, bias=qkv_bias)
+            self.mem_k_proj = nn.Linear(dim, num_kv_heads * self.head_dim, bias=qkv_bias)
+        else:
+            self.mem_q_proj = None
+            self.mem_k_proj = None
+
+        # Optional short (causal depthwise) convolution on the memory's q/k/v —
+        # the induction-head primitive that gated-delta recall relies on (cf.
+        # GatedDeltaNet). Applied on the full sequence (pre-eviction) so the
+        # convolved tokens are what the recurrent memory ingests. Opt-in: existing
+        # checkpoints (flag absent -> False) are byte-for-byte unchanged.
+        self.mem_use_short_conv = bool(mem_use_short_conv) and self.memory_enabled
+        self.mem_conv_size = int(mem_conv_size)
+        if self.mem_use_short_conv:
+            self.mem_q_conv1d = ShortConvolution(
+                hidden_size=num_heads * self.head_dim, kernel_size=mem_conv_size, activation="silu")
+            self.mem_k_conv1d = ShortConvolution(
+                hidden_size=num_kv_heads * self.head_dim, kernel_size=mem_conv_size, activation="silu")
+            self.mem_v_conv1d = ShortConvolution(
+                hidden_size=num_kv_heads * self.head_dim, kernel_size=mem_conv_size, activation="silu")
+        else:
+            self.mem_q_conv1d = self.mem_k_conv1d = self.mem_v_conv1d = None
+
+        # Optional GDN-style gated RMSNorm on the memory delta-output before mixing.
+        # GDN normalizes its delta readout with a per-head gated RMSNorm (o_norm);
+        # without it the raw delta output is poorly scaled for precise retrieval.
+        self.mem_use_output_norm = bool(mem_use_output_norm) and self.memory_enabled
+        if self.mem_use_output_norm:
+            self.mem_g_proj = nn.Linear(dim, num_heads * self.head_dim, bias=False)
+            self.mem_o_norm = FusedRMSNormGated(self.head_dim, eps=1e-6)
+        else:
+            self.mem_g_proj = None
+            self.mem_o_norm = None
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=rope_theta)
         self.reset_parameters()
@@ -140,6 +207,27 @@ class GatedMemSWA(nn.Module):
         beta = beta_logit.sigmoid()
         g = -self.A_log.float().exp() * F.softplus(a_logit.float() + self.dt_bias.float())
         return g, beta, mix_logit
+
+    # -------- memory induction-head short conv --------
+
+    def _apply_mem_conv(self, mem_q, mem_k, mem_v, conv_state_in, use_cache, cu_seqlens):
+        """Causal depthwise short-conv on the memory q/k/v over the FULL sequence
+        (pre-eviction), the induction primitive gated-delta recall relies on.
+        Returns convolved (q, k, v) and the updated (cs_q, cs_k, cs_v) conv cache."""
+        B, T = mem_q.shape[0], mem_q.shape[1]
+        cs_q = cs_k = cs_v = None
+        if conv_state_in is not None:
+            cs_q, cs_k, cs_v = conv_state_in
+        q, cs_q = self.mem_q_conv1d(
+            mem_q.reshape(B, T, -1), cache=cs_q, output_final_state=use_cache, cu_seqlens=cu_seqlens)
+        k, cs_k = self.mem_k_conv1d(
+            mem_k.reshape(B, T, -1), cache=cs_k, output_final_state=use_cache, cu_seqlens=cu_seqlens)
+        v, cs_v = self.mem_v_conv1d(
+            mem_v.reshape(B, T, -1), cache=cs_v, output_final_state=use_cache, cu_seqlens=cu_seqlens)
+        mem_q = q.view(B, T, self.num_heads, self.head_dim)
+        mem_k = k.view(B, T, self.num_kv_heads, self.head_dim)
+        mem_v = v.view(B, T, self.num_kv_heads, self.head_dim)
+        return mem_q, mem_k, mem_v, (cs_q, cs_k, cs_v)
 
     # -------- evicted-token shift (full prefill / training) --------
 
@@ -210,7 +298,11 @@ class GatedMemSWA(nn.Module):
         """
         g, beta, _ = self._compute_gates(hidden_states)
 
-        if cu_seqlens is not None:
+        if not self.mem_evicted_only:
+            # ablation: memory ingests ALL tokens (overlaps the window)
+            k_e, v_e = k_pre, v
+            valid = torch.ones(k_pre.shape[0], k_pre.shape[1], device=k_pre.device, dtype=torch.float32)
+        elif cu_seqlens is not None:
             k_e, v_e, valid = self._shift_evicted_varlen(k_pre, v, cu_seqlens)
         else:
             k_e, v_e, valid = self._shift_evicted_dense(k_pre, v)
@@ -391,9 +483,27 @@ class GatedMemSWA(nn.Module):
         k_pre = self.k_proj(hidden_states).view(B, T, self.num_kv_heads, self.head_dim)
         v = self.v_proj(hidden_states).view(B, T, self.num_kv_heads, self.head_dim)
 
+        # Memory branch read/write keys. With separate projections the memory
+        # learns its own (NoPE) content-addressing q/k, decoupled from SWA.
+        if self.mem_separate_proj:
+            mem_q = self.mem_q_proj(hidden_states).view(B, T, self.num_heads, self.head_dim)
+            mem_k = self.mem_k_proj(hidden_states).view(B, T, self.num_kv_heads, self.head_dim)
+        else:
+            mem_q, mem_k = q_pre, k_pre
+        mem_v = v  # value the memory ingests (kept distinct from the SWA value)
+
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
+
+        # Optional induction-head short conv on the memory q/k/v (full-sequence,
+        # causal, pre-eviction). conv cache is threaded for single-token decode.
+        conv_state_out = None
+        if self.mem_use_short_conv:
+            conv_state_in = last_state.get("conv_state") if last_state is not None else None
+            mem_q, mem_k, mem_v, conv_state_out = self._apply_mem_conv(
+                mem_q, mem_k, mem_v, conv_state_in, use_cache, cu_seqlens,
+            )
 
         # Absolute seq position (tokens seen so far). Falls back to ring length.
         seqlen_offset = 0
@@ -408,7 +518,7 @@ class GatedMemSWA(nn.Module):
             attn_state_old = last_state["attn_state"]
             len_old = attn_state_old[0].shape[1]
             old_k_pre_ring = attn_state_old[2].view(B, len_old, self.num_kv_heads, self.head_dim)
-            old_v_ring = attn_state_old[1].view(B, len_old, self.num_kv_heads, self.head_dim)
+            old_v_ring = attn_state_old[3].view(B, len_old, self.num_kv_heads, self.head_dim)
 
         max_seqlen = T + seqlen_offset
         if self.max_position_embeddings is not None:
@@ -425,14 +535,28 @@ class GatedMemSWA(nn.Module):
                 attn_state=(
                     k_rope.flatten(-2, -1),
                     v.flatten(-2, -1),
-                    k_pre.flatten(-2, -1),
+                    mem_k.flatten(-2, -1),
+                    mem_v.flatten(-2, -1),
                 ),
+                conv_state=conv_state_out,
                 layer_idx=self.layer_idx,
                 offset=T,
                 cache_kwargs=dict(window_size=self.window_size),
             )["attn_state"]
-            k_rope_ring = new_ring[0].view(B, -1, self.num_kv_heads, self.head_dim)
-            v_for_local = new_ring[1].view(B, -1, self.num_kv_heads, self.head_dim)
+            if is_cached_decode:
+                # Single-token (or post-prefill) decode: the windowed ring holds
+                # exactly the keys the new query may attend to.
+                k_rope_ring = new_ring[0].view(B, -1, self.num_kv_heads, self.head_dim)
+                v_for_local = new_ring[1].view(B, -1, self.num_kv_heads, self.head_dim)
+            else:
+                # Multi-token prefill: attend over the FULL current segment; the
+                # sliding-window mask in `_local_attention` enforces SWA. Using the
+                # cache's re-windowed ring here would misalign causal attention for
+                # every non-last query and corrupt the stored K/V that deeper
+                # layers (and later decode steps) read back. The windowed ring is
+                # still stored above for subsequent single-token decode.
+                k_rope_ring = k_rope
+                v_for_local = v
         else:
             k_rope_ring = k_rope
             v_for_local = v
@@ -453,22 +577,46 @@ class GatedMemSWA(nn.Module):
 
             if is_cached_decode:
                 o_mem, recurrent_state_out = self._cached_memory_step(
-                    q_pre=q_pre, k_pre_new=k_pre, v_new=v,
+                    q_pre=mem_q, k_pre_new=mem_k, v_new=mem_v,
                     hidden_states=hidden_states,
                     old_k_pre_ring=old_k_pre_ring, old_v_ring=old_v_ring,
                     initial_state=initial_state, output_final_state=use_cache,
                 )
             else:
                 o_mem, recurrent_state_out = self._memory_branch(
-                    q_pre=q_pre, k_pre=k_pre, v=v,
+                    q_pre=mem_q, k_pre=mem_k, v=mem_v,
                     hidden_states=hidden_states,
                     initial_state=initial_state, output_final_state=use_cache,
                     cu_seqlens=cu_seqlens,
                 )
 
-            _, _, mix_logit = self._compute_gates(hidden_states)
-            alpha = mix_logit.sigmoid().unsqueeze(-1)
-            o = alpha * o_local + (1.0 - alpha) * o_mem.to(o_local.dtype)
+            # GDN-style gated RMSNorm on the memory output (shapes it for precise
+            # retrieval) before blending with the SWA branch.
+            if self.mem_use_output_norm:
+                g_out = self.mem_g_proj(hidden_states).view(B, T, self.num_heads, self.head_dim)
+                o_mem = self.mem_o_norm(o_mem, g_out)
+
+            if self.disable_local:
+                # memory-only ablation: bypass the SWA mix; the memory alone predicts.
+                o = o_mem.to(o_local.dtype)
+                mix_logit = None
+            else:
+                _, _, mix_logit = self._compute_gates(hidden_states)
+                alpha = mix_logit.sigmoid().unsqueeze(-1)
+                # DIAGNOSTIC ONLY: force the mix to a constant at inference
+                # (GMSWA_FORCE_ALPHA=0.0 -> memory-only). Unset -> learned gate.
+                _force = os.environ.get("GMSWA_FORCE_ALPHA")
+                if _force is not None:
+                    alpha = torch.full_like(alpha, float(_force))
+                # SWA-drop prob: runtime (annealed curriculum) if set, else static.
+                drop_p = getattr(self, "_runtime_drop_p", None)
+                if drop_p is None:
+                    drop_p = self.mem_swa_drop_prob
+                if self.training and drop_p > 0.0:
+                    # Branchless + on-device rand => activation-checkpoint safe.
+                    keep = (torch.rand((), device=o_local.device) >= drop_p).to(alpha.dtype)
+                    alpha = alpha * keep
+                o = alpha * o_local + (1.0 - alpha) * o_mem.to(o_local.dtype)
 
         if past_key_values is not None and use_cache and recurrent_state_out is not None:
             past_key_values.update(

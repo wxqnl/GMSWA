@@ -1,0 +1,93 @@
+\begin{thebibliography}{17}
+\providecommand{\natexlab}[1]{#1}
+
+\bibitem[{Based()}]{based2024}
+Based. 2024.
+\newblock Based: Linear and Local Attention for Recall.
+\newblock arXiv:2402.18668 (UNVERIFIED -- verify before submission).
+
+\bibitem[{DeltaProduct()}]{deltaproduct2025}
+DeltaProduct. 2025.
+\newblock DeltaProduct.
+\newblock arXiv:2502.10297 (UNVERIFIED -- verify before submission).
+
+\bibitem[{FineWebEdu()}]{finewebedu}
+FineWebEdu. 2024.
+\newblock FineWeb-Edu.
+\newblock ADD canonical dataset reference before submission.
+
+\bibitem[{FLA()}]{fla}
+FLA. 2024.
+\newblock flash-linear-attention (FLA) library.
+\newblock ADD canonical reference before submission.
+
+\bibitem[{FwPKM()}]{fwpkm2026}
+FwPKM. 2026.
+\newblock Fast-Weight Product-Key Memory.
+\newblock arXiv:2601.00671 (UNVERIFIED -- confirm this preprint exists).
+
+\bibitem[{GatedDeltaNet()}]{gateddeltanet2024}
+GatedDeltaNet. 2024.
+\newblock Gated DeltaNet.
+\newblock arXiv:2412.06464 (UNVERIFIED -- verify before submission).
+
+\bibitem[{laLTE()}]{lalte2025}
+laLTE. 2025.
+\newblock laLTE: Sliding-Window Attention with Linear Attention and Learned
+  Token Eviction.
+\newblock arXiv:2510.20787 (UNVERIFIED -- confirm this preprint exists).
+
+\bibitem[{Longformer()}]{longformer}
+Longformer. 2020.
+\newblock Longformer: The Long-Document Transformer.
+\newblock ADD canonical reference before submission.
+
+\bibitem[{Mamba()}]{mamba2023}
+Mamba. 2023.
+\newblock Mamba: Linear-Time Sequence Modeling with Selective State Spaces.
+\newblock arXiv:2312.00752 (UNVERIFIED -- verify before submission).
+
+\bibitem[{Mistral()}]{mistral_swa}
+Mistral. 2023.
+\newblock Mistral / Sliding-Window Attention.
+\newblock ADD canonical reference before submission.
+
+\bibitem[{RecallScale()}]{recallscale2025}
+RecallScale. 2025.
+\newblock Scale-Emergence of Recall in Sub-Billion Base Models.
+\newblock arXiv:2507.06457 (UNVERIFIED -- same-stack study omitting 340M
+  recall).
+
+\bibitem[{RULER()}]{ruler2024}
+RULER. 2024.
+\newblock RULER: What's the Real Context Size of Your Long-Context Language
+  Models?
+\newblock arXiv:2404.06654 (UNVERIFIED -- verify before submission).
+
+\bibitem[{RWKV7()}]{rwkv7_2025}
+RWKV7. 2025.
+\newblock RWKV-7.
+\newblock arXiv:2503.14456 (UNVERIFIED -- verify before submission).
+
+\bibitem[{SWAX()}]{swax2025}
+SWAX. 2025.
+\newblock SWAX: Sliding-Window Attention with xLSTM.
+\newblock arXiv:2509.24552 (UNVERIFIED -- confirm this preprint exists).
+
+\bibitem[{TestTimeRegression()}]{ttr2025}
+TestTimeRegression. 2025.
+\newblock A Test-Time-Regression View of Associative Memory (rank-bounded
+  capacity).
+\newblock arXiv:2501.12352 (UNVERIFIED -- verify before submission).
+
+\bibitem[{Titans()}]{titans2025}
+Titans. 2025.
+\newblock Titans: Learning to Memorize at Test Time.
+\newblock arXiv:2501.00663 (UNVERIFIED -- verify before submission).
+
+\bibitem[{Zoology()}]{zoology2023}
+Zoology. 2023.
+\newblock Zoology: Measuring and Improving Recall in Efficient Language Models.
+\newblock arXiv:2312.04927 (UNVERIFIED -- verify before submission).
+
+\end{thebibliography}

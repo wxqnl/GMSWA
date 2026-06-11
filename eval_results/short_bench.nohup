@@ -1,0 +1,5 @@
+[Wed Jun  3 05:36:22 AM EDT 2026] ===== standard short-bench START on GPUs 0-3 (Transformer, GMSWA-v3, GDN) =====
+[Wed Jun  3 05:36:22 AM EDT 2026] Transformer-340M-10k short-context | tasks=wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,boolq,sciq,copa
+[Wed Jun  3 05:38:07 AM EDT 2026] GMSWA-340M-v3-10k short-context | tasks=wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,boolq,sciq,copa
+[Wed Jun  3 05:40:22 AM EDT 2026] GDN-340M-10k short-context | tasks=wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,boolq,sciq,copa
+[Wed Jun  3 05:45:37 AM EDT 2026] SHORT BENCH REST DONE
