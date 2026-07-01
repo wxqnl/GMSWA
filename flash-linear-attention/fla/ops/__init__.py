@@ -13,7 +13,6 @@ from .generalized_delta_rule import (
     fused_recurrent_iplr_delta_rule,
 )
 from .gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
-from .gm_swa import fused_recurrent_gm_swa
 from .gsa import chunk_gsa, fused_recurrent_gsa
 from .hgrn import fused_recurrent_hgrn
 from .kda import chunk_kda, fused_recurrent_kda
@@ -40,7 +39,6 @@ __all__ = [
     'fused_recurrent_dplr_delta_rule', 'fused_recurrent_iplr_delta_rule',
     'chunk_kda', 'fused_recurrent_kda',
     'chunk_gla', 'fused_chunk_gla', 'fused_recurrent_gla',
-    'fused_recurrent_gm_swa',
     'chunk_gsa', 'fused_recurrent_gsa',
     'fused_recurrent_hgrn',
     'chunk_lightning_attn', 'fused_recurrent_lightning_attn',

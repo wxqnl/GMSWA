@@ -1,0 +1,272 @@
+%File: GMSWA_STATE_TRACKING_AAAI_2026_06_25.tex
+% Submission-oriented draft generated after the 2026-06-25 v11gb scale-check.
+% Compile in the GMSWA paper directory: pdflatex -> bibtex -> pdflatex -> pdflatex
+
+\documentclass[letterpaper]{article}
+\usepackage[submission]{aaai2026}
+\usepackage{times}
+\usepackage{helvet}
+\usepackage{courier}
+\usepackage[hyphens]{url}
+\usepackage{graphicx}
+\urlstyle{rm}
+\def\UrlFont{\rm}
+\usepackage{natbib}
+\usepackage{caption}
+\frenchspacing
+\setlength{\pdfpagewidth}{8.5in}
+\setlength{\pdfpageheight}{11in}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+
+\setcounter{secnumdepth}{2}
+
+\title{Restoring State Tracking to Sliding-Window Attention\\with Gated Recurrent Memory}
+\author{Anonymous Submission}
+\affiliations{Paper under double-blind review --- author and affiliation details omitted.}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Long-context language modeling is often evaluated as if memory were a single capability. We argue that two capabilities should be separated: \emph{retrieval}, the lookup of static past tokens, and \emph{state tracking}, the iterative update of a latent state over time. Sliding-window attention (SWA) is useful for local retrieval and offers a constant cache, but it is structurally weak for state tracking beyond its window. Recurrent sequence models offer step-wise state, but recurrence--attention hybrids can fail to use the recurrent branch when a local-attention shortcut is available. We study this failure in GMSWA, a hybrid layer that fuses exact local SWA with a gated-delta recurrent matrix memory. Motivated by recent work on transformer state-tracking limits and negative eigenvalues in linear RNNs, we add a beta range that permits negative eigenvalues, and construct leak-free synthetic state-tracking tasks in which the target state is never present in the input stream. The experiments reveal a causal chain: SWA and finite-depth Transformers fail out of range; pure memory with beta in $(0,1)$ fails; pure memory with beta in $(0,2)$ solves parity perfectly; the same memory inside a naive hybrid fails; forcing the hybrid gate to memory recovers perfect performance; and a memory-biased gate initialization fixes the learned hybrid. The pattern generalizes from parity to $S_3$ group composition. At 340M parameters, the same memory changes train stably and preserve retrieval for the beta/multiscale variant, while the memory-biased gate introduces a mild NIAH/recall regression, exposing a real retrieval--state-tracking calibration tradeoff. Our contribution is therefore not a state-of-the-art long-context model, but a controlled diagnosis and fix for gate collapse in hybrid SWA--recurrence models.
+\end{abstract}
+
+\section{Introduction}
+
+Efficient long-context language models are usually discussed in terms of a single question: how much past information can the model remember under a bounded cache? This framing hides an important distinction. A model may retrieve a static token from the past, or it may maintain a latent state that changes after each observation. These are different computational problems. Retrieval can often be solved by searching over stored tokens. State tracking requires a recurrence
+\begin{equation}
+  s_t = f(s_{t-1}, x_t),
+\end{equation}
+where the state is not necessarily recoverable from any single previous token.
+
+This distinction matters for sliding-window attention. SWA is attractive because it bounds the KV cache and preserves exact local attention \citep{beltagy2020longformer,jiang2023mistral}. It is also widely deployed in practical long-context systems. But a sliding window discards tokens outside the window. Beyond that boundary, the model cannot retrieve old tokens, and it cannot maintain a state unless some recurrent mechanism carries information forward. Recent theoretical perspectives sharpen this concern: finite-depth feedforward computation must repeatedly re-encode state through depth, whereas a time-axis recurrence can update state at every step \citep{mozer2026topological}.
+
+Hybrid attention--recurrence models are a natural response \citep{de2024griffin,lieber2024jamba,ren2024samba,glorioso2024zamba,arora2024based,dong2024hymba}. A local attention branch handles local retrieval and language quality; a recurrent branch maintains compressed state. Yet the hybrid itself introduces a new failure mode: a learned gate may prefer the easy local-attention shortcut during training and suppress the recurrent branch, even when the recurrent branch is the only component capable of solving the long-range state-tracking task.
+
+We study this failure in \textbf{GMSWA} (Gated-Memory Sliding-Window Attention), a layer that combines exact SWA with a gated-delta recurrent matrix memory. Earlier GMSWA experiments showed a mixed picture: strong base quality and real recall, but no improvement on synthetic needle retrieval. In this paper, we reframe the model around a sharper question: \emph{Can a sliding-window model recover long-range state tracking through a recurrent memory, and what prevents a naive hybrid from using that memory?}
+
+Our contributions are:
+\begin{enumerate}
+  \item We separate token retrieval benchmarks such as NIAH from state-tracking tasks such as parity, group composition, and latch. This prevents overclaiming: improving state tracking should not be expected to improve NIAH automatically.
+  \item We add a negative-eigenvalue memory switch, \texttt{mem\_beta\_range}=2.0, motivated by work showing that negative eigenvalues unlock parity-like state tracking in linear RNNs \citep{grazzi2024unlocking}.
+  \item We construct leak-free synthetic state-tracking tasks where the running state is never shown as input. These tasks expose a hybrid-specific gate-collapse failure.
+  \item We diagnose and fix the failure: pure beta=2 memory solves parity, the same memory inside a naive hybrid fails, forcing the gate to memory recovers, and initializing the gate toward memory fixes the learned hybrid on parity and $S_3$.
+  \item We run 340M language-model scale checks and report the tradeoff honestly: beta/multiscale changes preserve retrieval-axis performance, while the memory-biased gate trains stably but mildly regresses NIAH/recall.
+\end{enumerate}
+
+Figure~\ref{fig:mechanism} summarizes the argument: the problem is not that recurrent memory is incapable, but that a naive hybrid gate can suppress it.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/gmswa_mechanism_causal_chain.pdf}
+\caption{Mechanism overview. Long-context memory separates into retrieval and state tracking. SWA supplies local retrieval, while step-wise recurrence supplies state tracking. The key failure is hybrid gate collapse: the learned mix gate can prefer the local SWA shortcut even when recurrent memory is required. Our diagnosis shows that beta=2 memory is capable, the naive gate suppresses it, forcing memory recovers, and memory-biased gate initialization fixes the learned hybrid.}
+\label{fig:mechanism}
+\end{figure*}
+
+\section{Related Work}
+
+\paragraph{Sliding-window and sparse attention.}
+Local and block-sparse attention reduce memory and compute by restricting attention patterns \citep{beltagy2020longformer,zaheer2020bigbird,jiang2023mistral}. They preserve exact local attention but cannot directly access tokens outside the retained window. GMSWA keeps local exactness while adding a recurrent state.
+
+\paragraph{Linear attention, SSMs, and delta rules.}
+Linear attention \citep{katharopoulos2020transformers}, state-space models \citep{gu2023mamba,dao2024mamba2}, and DeltaNet/Gated DeltaNet \citep{yang2024deltanet,yang2024gateddeltanet} maintain fixed-size recurrent states. These architectures provide step-wise recurrence, but can trail softmax attention on local language quality. GMSWA uses a gated-delta-style memory as its recurrent branch.
+
+\paragraph{Hybrid attention--recurrence models.}
+Griffin, Samba, Jamba, Zamba, RecurrentGemma, YOCO, Based, Hymba, and related hybrids combine local/global attention with recurrent or linear components \citep{de2024griffin,ren2024samba,lieber2024jamba,glorioso2024zamba,botev2024recurrentgemma,sun2024yoco,arora2024based,dong2024hymba}. GMSWA belongs to this family. The novelty claimed here is not merely the block design, but the controlled diagnosis of a hybrid-specific failure: the gate can suppress a capable recurrent branch.
+
+\paragraph{State tracking.}
+Mozer et al. argue that feedforward Transformers are topologically ill-suited for maintaining evolving state indefinitely \citep{mozer2026topological}. Grazzi et al. show that linear RNNs require negative eigenvalues to unlock parity-like state tracking \citep{grazzi2024unlocking}. Our experiments connect these ideas to a practical SWA--recurrence hybrid: negative eigenvalues make the memory capable, but the hybrid gate must still route to that memory.
+
+\section{GMSWA}
+
+Given hidden states $x\in\mathbb{R}^{B\times T\times d}$, each GMSWA layer computes a local attention output and a recurrent memory output:
+\begin{equation}
+  o_t = \alpha_t \odot o_{\mathrm{SWA},t} + (1-\alpha_t)\odot o_{\mathrm{mem},t},\quad
+  \alpha_t = \sigma(W_\alpha x_t + b_\alpha).
+\end{equation}
+The local branch is exact causal SWA with window $W$. The recurrent branch is a gated-delta matrix memory:
+\begin{equation}
+S_t = \mathrm{diag}(g_t)S_{t-1} + \beta_t(v_t - S_{t-1}k_t)k_t^\top,
+\quad o_{\mathrm{mem},t}=S_t q_t.
+\end{equation}
+The branch uses separate memory projections, L2-normalized keys, and short convolutions over memory $q,k,v$, following the gated-delta design.
+
+\subsection{Negative-Eigenvalue Switch}
+
+In the original memory, beta is produced by a sigmoid and lies in $(0,1)$. For a rank-one delta update, the transition term has eigenvalues constrained to $[0,1]$. This is insufficient for tasks such as parity that require sign-flipping dynamics. We introduce
+\begin{equation}
+  \beta_t = R\cdot\sigma(z_t),
+\end{equation}
+where \texttt{mem\_beta\_range}=$R$. The default $R=1$ preserves the original behavior; $R=2$ permits eigenvalues in $[-1,1]$.
+
+\subsection{Multi-Scale Memory}
+
+We add \texttt{mem\_num\_scales}, with slow and fast decay ranges and a learned scale gate. The slow scale is initialized for long retention, while the fast scale is initialized for rapid updates. This gives the memory a multi-timescale state representation.
+
+\subsection{Gate-Bias Initialization}
+
+The hybrid output gate can collapse to the local SWA branch during training. We therefore initialize the mix gate toward memory:
+\begin{equation}
+  b_\alpha = -4.
+\end{equation}
+Since $\alpha$ is the SWA weight, a negative bias starts the layer closer to the memory branch. The gate remains learned. This is not equivalent to forcing memory at inference; it changes the optimization path so that the recurrent branch is not suppressed early.
+
+\section{Leak-Free State-Tracking Benchmark}
+
+We construct streams of alternating operation tokens and content-free query tokens:
+\begin{equation}
+  \mathrm{op}_1, Q, \mathrm{op}_2, Q, \ldots, \mathrm{op}_n, Q.
+\end{equation}
+At each query position, the model predicts the cumulative latent state after the preceding operation. The state is never present in the input stream. Loss is applied only at query positions, and logits at a query position predict the state at that same position. This avoids next-token leakage and ensures that a model must either see the relevant operation history or carry state forward.
+
+We report accuracy by operation-distance buckets relative to the SWA window: $\le W/2$, $W/2..W$, $W..2W$, $2W..4W$, and $>4W$. Tasks include parity (one-bit cumulative XOR), $S_3$ group composition, and latch. All synthetic models use depth 6, width 256, window 64, sequence length 1024, 4000 steps, and a single seed unless otherwise stated.
+
+\section{Experiments}
+
+\subsection{Retrieval-Axis LM Scale Checks}
+
+All LM scale checks use a 340M model, 24 layers, hidden size 1024, FineWeb-Edu-100BT, 10K steps, context length 2048, and the same tokenizer and optimizer. The evaluation suite includes RULER/NIAH at lengths 512--8192 and recall tasks SWDE/FDA/SQuAD.
+
+\begin{table*}[t]
+\centering\small
+\caption{Retrieval-axis scale checks. v10ms preserves NIAH/recall relative to v5conv. v11gb trains stably but mildly regresses retrieval/recall, so gate-bias is not a free NIAH improvement.}
+\label{tab:lm-scale}
+\begin{tabular}{lcccccc}
+\toprule
+Model & NIAH@512 & @1024 & @2048 & @4096 & @8192 & Recall avg \\
+\midrule
+v5conv baseline & 0.777 & 0.475 & 0.242 & 0.143 & 0.070 & 0.155 \\
+v10ms: multiscale + beta=2 & 0.730 & 0.489 & 0.231 & 0.156 & 0.070 & 0.160 \\
+v11gb: v10ms + gate bias & 0.730 & 0.424 & 0.208 & 0.101 & 0.056 & 0.134 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The v10ms model preserves the retrieval axis: its NIAH/recall results are effectively tied with v5conv. The gate-bias variant v11gb trains stably (final loss 2.5415) but regresses mildly on NIAH and recall. This is important: the state-tracking fix is not a free NIAH improvement. It introduces a calibration tradeoff between retrieval and memory-biased state tracking.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/gmswa_retrieval_scalecheck.pdf}
+\caption{Retrieval-axis scale check at 340M. v10ms (multi-scale memory with beta=2) is essentially tied with the v5conv baseline on NIAH and recall, while v11gb (gate-bias) trains stably but mildly regresses the retrieval axis. This supports the paper's scope: gate-bias fixes synthetic state tracking, but it is not a free NIAH improvement.}
+\label{fig:retrieval-scale}
+\end{figure*}
+
+\subsection{Parity: Causal Mechanism Chain}
+
+\begin{table*}[t]
+\centering\small
+\caption{Parity state tracking. Buckets are operation-distance ranges relative to the SWA window. Pure beta=2 memory solves the task, the naive hybrid fails, forcing the gate to memory recovers, and gate-bias fixes the learned hybrid.}
+\label{tab:parity}
+\begin{tabular}{lccccc l}
+\toprule
+Variant & $\le W/2$ & $W/2..W$ & $W..2W$ & $2W..4W$ & $>4W$ & Interpretation \\
+\midrule
+SWA & 1.00 & 0.77 & 0.50 & 0.50 & 0.50 & window cliff \\
+Transformer & 0.98 & 0.61 & 0.50 & 0.50 & 0.50 & finite-depth limit \\
+memonly beta=1 & 0.87 & 0.51 & 0.50 & 0.50 & 0.50 & no negative eigenvalues \\
+\textbf{memonly beta=2} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & memory is capable \\
+naive GMSWA beta=2 & 0.94 & 0.52 & 0.50 & 0.50 & 0.50 & gate collapse \\
+\textbf{force $\alpha=0$} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & gate is bottleneck \\
+\textbf{gate-bias only} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & learned hybrid fixed \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The causal chain has no counterexample in this setting. The memory branch is sufficient when beta permits negative eigenvalues. The naive hybrid fails because the gate does not route to memory. Forcing memory recovers perfect accuracy, and the learned gate can be fixed by a memory-biased initialization.
+
+\subsection{$S_3$ Group Composition}
+
+\begin{table*}[t]
+\centering\small
+\caption{$S_3$ group-composition state tracking. Random accuracy is $1/6=0.167$. The parity mechanism generalizes to a six-class non-commutative state-tracking task.}
+\label{tab:s3}
+\begin{tabular}{lccccc l}
+\toprule
+Variant & $\le W/2$ & $W/2..W$ & $W..2W$ & $2W..4W$ & $>4W$ & Interpretation \\
+\midrule
+SWA & 0.540 & 0.200 & 0.167 & 0.165 & 0.168 & window cliff \\
+Transformer & 0.474 & 0.168 & 0.164 & 0.167 & 0.167 & random at long range \\
+\textbf{memonly beta=2} & \textbf{1.000} & \textbf{1.000} & \textbf{1.000} & \textbf{0.998} & \textbf{0.972} & recurrent memory tracks state \\
+naive GMSWA beta=2 & 0.496 & 0.172 & 0.164 & 0.167 & 0.167 & gate collapse \\
+\textbf{gate-bias only} & \textbf{1.000} & \textbf{1.000} & \textbf{0.995} & \textbf{0.967} & \textbf{0.887} & learned hybrid mostly fixed \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The $S_3$ results show that the parity finding is not merely a one-bit artifact. A beta=2 memory nearly solves long-range group composition, while the naive hybrid collapses to chance. Gate-bias recovers most of the long-range performance. Figure~\ref{fig:synthetic} visualizes the common pattern across parity and $S_3$: SWA and Transformers collapse at long distance, memory with beta=2 remains high, naive GMSWA collapses, and gate-bias restores learned state tracking.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.96\textwidth]{figures/gmswa_synthetic_state_tracking.pdf}
+\caption{Leak-free synthetic state-tracking results. Each x-axis bucket denotes operation distance relative to the SWA window. In parity and $S_3$, SWA and finite-depth Transformers fall to chance at long distances. Pure recurrent memory with beta=2 remains accurate, but the same memory inside a naive hybrid fails because the gate collapses to the SWA shortcut. A memory-biased gate initialization restores learned hybrid state tracking.}
+\label{fig:synthetic}
+\end{figure*}
+
+\subsection{Latch}
+
+\begin{table}[t]
+\centering\small
+\caption{Latch state tracking. The one-bit latch is easier than parity and $S_3$, but shows SWA's depth-relay behavior before collapse.}
+\label{tab:latch}
+\begin{tabular}{lccccc}
+\toprule
+Variant & $\le W/2$ & $W/2..W$ & $W..2W$ & $2W..4W$ & $>4W$ \\
+\midrule
+SWA & 1.0 & 1.0 & 1.0 & 0.73 & 0.49 \\
+Transformer & 1.0 & 1.0 & 1.0 & 1.0 & 1.0 \\
+memory/GMSWA & 1.0 & 1.0 & 1.0 & 1.0 & 1.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Latch is easy compared with parity and $S_3$. It is still useful because SWA shows the expected depth-relay behavior before collapsing at long distances, while recurrent memory remains distance-invariant. Figure~\ref{fig:latch-validity} also summarizes task validity: parity and $S_3$ are valid hard state-tracking diagnostics; latch is valid but easy; dense flip-flop and $S_5$ were rejected after validity checks.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\columnwidth]{figures/gmswa_latch_validity.pdf}
+\caption{Latch behavior and task-validity summary. SWA can relay the one-bit latch for several windows before collapsing, while recurrent memory and full attention solve it. The right panel records which synthetic tasks were retained or rejected as valid diagnostics.}
+\label{fig:latch-validity}
+\end{figure}
+
+\section{Discussion}
+
+\paragraph{Gate collapse is a hybrid-specific failure.}
+The main result is not simply that recurrence helps state tracking. Pure recurrence with beta=2 does help, but the same recurrence inside a hybrid can fail. The failure is produced by the interaction between the local branch and the gate. During training, local SWA offers an easier short-range shortcut. The gate can therefore learn to rely on SWA even on tasks whose solution ultimately requires recurrence.
+
+\paragraph{Retrieval and state tracking should not be conflated.}
+NIAH is a retrieval benchmark. It asks whether a model can recover static tokens from a long context. Parity and $S_3$ require state tracking: the target is not present as a token and must be computed by integrating operations. The v11gb scale-check shows why this distinction matters. Biasing the gate toward memory fixes synthetic state tracking but mildly hurts NIAH and recall. A future production model should tune the gate to preserve retrieval while enabling state tracking, rather than treating one benchmark as a proxy for all memory.
+
+\paragraph{Why the gate-bias result is useful.}
+Even with the v11gb retrieval regression, the gate-bias result is valuable. It proves that the learned hybrid can be made to use the recurrent state. The remaining problem is calibration, not capability: how much memory bias is needed, whether the bias should be annealed, and whether gate regularization can encourage memory use only when state tracking is needed.
+
+\section{Limitations}
+
+All synthetic and 340M scale-check results are single-seed. The causal gaps are large, but final numbers still need error bars. Parity and $S_3$ isolate state tracking, but they are not natural language; a natural-language-like entity-state or task-phase benchmark is needed. The gate-bias scale-check regresses NIAH and recall mildly, so we do not present it as a finished deployment recipe. The current diagnosis uses causal interventions but not yet gate-activation visualizations. Larger models or longer training may alter the retrieval/state-tracking balance. Finally, we compare against controlled Transformer/SWA/GDN baselines but not every recent hybrid architecture under the same recipe.
+
+\section{Conclusion}
+
+GMSWA shows that restoring recurrence to sliding-window attention is not just an efficiency trick. It exposes a deeper optimization issue in hybrid memory models: a capable recurrent memory can be suppressed by a learned gate that prefers local-attention shortcuts. By separating retrieval from state tracking, adding a negative-eigenvalue memory update, and using leak-free synthetic diagnostics, we identify the failure and show that a simple memory-biased gate initialization fixes it in controlled state-tracking tasks. The real-LM scale check is more cautious: the same bias trains stably but mildly hurts retrieval, making calibration the next step. The resulting paper is therefore a mechanism paper: it diagnoses and fixes gate collapse for state tracking, while clearly delimiting what remains unsolved for retrieval.
+
+\section*{Reproducibility and Ethics Statements}
+
+\textbf{Data availability.} Training used FineWeb-Edu-100BT and standard lm-evaluation-harness/RULER-style tasks. Synthetic task generators and evaluation scripts are in \texttt{/data/Minko/st\_gen\_tasks.py} and \texttt{/data/Minko/st\_train\_eval.py}; experiment records are in \texttt{/shared/Minko/GMSWA/paper/STATE\_TRACKING\_EXPERIMENTS.md}.
+
+\textbf{Code availability.} The GMSWA implementation is in \texttt{flash-linear-attention/fla/layers/gated\_mem\_swa.py} and \texttt{flash-linear-attention/fla/models/gated\_mem\_swa/}. The v11gb checkpoint and logs are under \texttt{/data/Minko/GMSWA/flash-linear-attention/flame/saves/GMSWA-340M-v11gb-10k/} and \texttt{/data/Minko/GMSWA/eval\_results/suite/GMSWA-v11gb/}.
+
+\textbf{Ethics statement.} This work uses public text corpora and synthetic diagnostic tasks. It does not involve human subjects, private user data, or deployed decision-making systems.
+
+\textbf{Author contributions.} Anonymous for review. Conceptualization, methodology, software, investigation, and writing: project authors.
+
+\textbf{Conflict of interest.} The authors declare no known conflicts of interest.
+
+\textbf{Funding.} Funding information is omitted for anonymous review and should be filled before camera-ready submission.
+
+\textbf{AI assistance disclosure.} AI tools were used to assist with drafting, editing, code navigation, and experiment-log summarization. All claims, numerical results, and citations must be verified by the authors before submission.
+
+\bibliography{references}
+\bibliographystyle{aaai2026}
+
+\end{document}

@@ -1,4 +1,5 @@
 .venv/
+.venv311/
 .vscode/
 __pycache__/
 .pytest_cache/
@@ -19,9 +20,26 @@ m_sweep/*/train.log
 
 flash-linear-attention/flame/saves/
 flash-linear-attention/flame/logs/
+flash-linear-attention/flame/torchtitan/
 flash-linear-attention/flame/lm-evaluation-harness/build/
 flash-linear-attention/build/
 flash-linear-attention/dist/
 flash-linear-attention/*.egg-info/
 flash-linear-attention/.pytest_cache/
 flash-linear-attention/tmp_*.py
+
+# local agent/editor config, vendored skills, and session dumps (not project content)
+.claude/
+tools/
+gmswa.txt
+
+# generated paper/build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.codex-bak-*
+*.bak.*
+*.nohup

@@ -1,0 +1,284 @@
+% ============================================================
+% GMSWA — AAAI submission skeleton
+% Built from academic-research-skills/academic-paper/templates/latex_article_template.tex,
+% adapted to the AAAI style. Drop in the official aaai style file before submission:
+%   replace \documentclass{article} below with \documentclass[letterpaper]{article}
+%   + \usepackage{aaai26}  (or the year's official package: aaai24/aaai25/aaai26)
+%   + \usepackage{times}\usepackage{helvet}\usepackage{courier}
+%   per the AAAI Author Kit. Remove geometry/setspace if the AAAI class forbids them.
+% Compile: pdflatex -> bibtex -> pdflatex x2   (BibTeX style: aaai)
+% ============================================================
+
+\documentclass[11pt]{article}
+
+% ---- Packages (trim to AAAI Author Kit rules before submission) ----
+\usepackage[margin=1in]{geometry}   % REMOVE under official aaai class
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{enumitem}
+
+% Under the official AAAI class, use its bibliography setup instead:
+%   \usepackage{natbib}\bibliographystyle{aaai}
+\usepackage[numbers,square]{natbib}
+\bibliographystyle{plainnat}
+
+\newcommand{\pending}{\textbf{[PENDING]}}
+
+\title{GMSWA: Gated-Memory Sliding-Window Attention for\\
+Constant-Memory Long-Context Language Modeling}
+\author{Author 1 \and Author 2 \and Corresponding Author\\
+\texttt{corresponding@example.com}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Sliding-window attention (SWA) gives Transformers a constant per-step KV-cache and
+linear-time decoding, but evicted context is lost; linear-attention and state-space
+models keep a constant recurrent state yet weaken sharp local retrieval. We present
+\textbf{GMSWA}, a single constant-memory attention layer composing an exact local
+softmax window with a recurrent gated-delta-rule matrix memory. The branches are
+\emph{complementary by construction}: the window attends to the most recent $W$
+tokens while the memory ingests \emph{only window-evicted tokens}, so their coverage
+partitions causal history with no overlap and no future leakage. The output mixes the
+branches by a learned per-position gate $o=\alpha\cdot\text{SWA}+(1-\alpha)\cdot\text{mem}$.
+A revised variant (v3) adds separate \emph{NoPE} content-retrieval projections
+($\text{mem}_q/\text{mem}_k$) for the memory, decoupling associative recall from rotary
+phase and yielding length extrapolation. The layer's state is independent of sequence
+length. At 340M parameters / 10B FineWeb-Edu tokens under a shared recipe, GMSWA-v3
+attains the lowest next-token loss at every measured position among constant-memory
+models, with a margin over SWA that \emph{grows with distance}. Beyond the 2048-token
+training length, a same-recipe full-attention Transformer collapses (loss 5.74 then 7.21),
+whereas GMSWA-v3 is best of all four models (3.99, 4.04). On single-needle retrieval at
+this scale GMSWA-v3 matches SWA --- discrete recall is scale-emergent and weak in
+sub-billion base models --- so the 340M memory delivers \emph{soft} utilization (lower
+loss) rather than sharp discrete copy; we report this honestly and frame the predicted
+recall win as scale-dependent (\pending, 1B). A training-free capacity probe explains the
+bilinear rank wall motivating a recall-versus-memory frontier on which GMSWA is positioned.
+\end{abstract}
+
+\noindent\textit{Keywords}: sliding-window attention; constant-memory inference;
+linear attention; gated delta rule; long-context language modeling; length extrapolation.
+
+% ============================================================
+\section{Introduction}
+\subsection{Problem and Motivation}
+% O(T^2) attention + linear KV-cache growth; SWA loses evicted context; linear/SSM
+% have weak local retrieval. The failure modes are complementary => compose them.
+% (Body: see GMSWA_AAAI_draft.md Sec 1.1.)
+
+\subsection{Research Questions}
+\begin{enumerate}[leftmargin=*]
+  \item Can one constant-memory layer combine an exact window with a recurrent memory so the
+        memory measurably improves long-context modeling beyond the window alone?
+  \item Does feeding the memory \emph{only evicted tokens} plus \emph{NoPE content retrieval}
+        produce graceful extrapolation, unlike full attention's rotary collapse?
+  \item What is the honest reach at small scale --- soft loss utilization vs.\ sharp discrete
+        recall --- and how do bilinear capacity limits explain it?
+\end{enumerate}
+
+\subsection{Contributions}
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Architecture.} GMSWA: exact SWA $+$ gated-delta-rule matrix memory under a
+        learned gate, with \emph{complementary} eviction-defined coverage (no overlap, no leakage).
+  \item \textbf{NoPE content retrieval (v3)} for length extrapolation.
+  \item \textbf{Best-in-class constant-memory long-context utilization}, extrapolating past full attention.
+  \item \textbf{A recall--memory frontier} and an honest small-scale account (rank wall).
+\end{enumerate}
+
+% ============================================================
+\section{Related Work}
+\subsection{Sparse and Sliding-Window Attention}
+% Longformer / Mistral SWA; GMSWA keeps an EXACT window, delegates the tail to memory.
+\subsection{Linear Attention, SSMs, Constant-Memory Recall}
+% Mamba, Gated DeltaNet, DeltaProduct, RWKV-7, Based; Zoology recall-throughput;
+% test-time-regression rank bound.
+\subsection{Window+Memory Hybrids and How GMSWA Differs}
+% laLTE (learned eviction), SWAX (xLSTM), Titans, FwPKM. GMSWA differs by:
+% (1) complementary eviction-defined coverage, (2) NoPE content retrieval, (3) frontier framing.
+
+% ============================================================
+\section{Method}
+\subsection{Overview}
+Each layer fuses two branches by a learned per-position sigmoid gate:
+\begin{equation}
+o_t = \alpha_t \, o_{\text{local}}[t] + (1-\alpha_t)\, o_{\text{mem}}[t].
+\end{equation}
+A single projection $\mathrm{Linear}(d,3H)$ yields, per head, the write strength $\beta$,
+log-decay $g$, and mix coefficient $\alpha$.
+
+\subsection{Local Branch --- Exact Sliding-Window Attention}
+\begin{equation}
+o_{\text{local}}[t] = \mathrm{softmax}\!\left( q_t K_{[t-W+1:t]}^\top / \sqrt{d} \right) V_{[t-W+1:t]}.
+\end{equation}
+Implemented via \texttt{flash\_attn\_func(causal=True, window\_size=(W-1,0))} with an
+equivalent SDPA${+}$mask fallback. Local cache $=W\,H_{kv}\,2\,d$, constant in $T$.
+
+\subsection{Memory Branch --- Gated-Delta-Rule Matrix Fast Weight}
+Each query head holds $S\in\mathbb{R}^{d\times d}$. A token is written \emph{only on
+eviction} from the window, with key $\hat{k}_e$ and value $v_e$:
+\begin{equation}
+S_t = e^{g_t}\!\left( S_{t-1} - \beta_t S_{t-1}\hat{k}_e \hat{k}_e^\top \right) + \beta_t v_e \hat{k}_e^\top,
+\qquad o_{\text{mem}}[t] = S_t\,\hat{q}_t .
+\end{equation}
+Training uses FLA's \texttt{chunk\_gated\_delta\_rule} (exact backward); decoding uses an
+inline path. Memory state $=H_q\,d\,d$, constant in $T$.
+
+\subsection{Complementary Coverage}
+Eviction \emph{is} the write event, so at step $t$ the memory holds $[0,t{-}W]$ and the
+window sees $[t{-}W{+}1,t]$: disjoint sets covering $[0,t]$ exactly. Verified bit-exactly
+(no future leakage) and by prefill/decode consistency (cosine $1.0$).
+
+\subsection{NoPE Content-Retrieval Projections (v3)}
+Separate position-free $\text{mem}_q/\text{mem}_k$ projections let the memory retrieve by
+content, independent of rotary phase; with corrected gate init ($\alpha\!\approx\!0.98$ at
+start), training begins near pure SWA and learns to use memory. This drives extrapolation.
+
+\subsection{Constant-Memory Analysis}
+Per-layer state $=$ local ring buffer $+$ matrix memory, both independent of $T$, versus
+full attention's linearly growing KV-cache.
+
+\subsection{Why Bilinear: the Rank Wall}
+Under the test-time-regression view, storing $D$ associations needs state rank $\approx D$,
+i.e.\ $O(D^2)$ entries --- the rank wall (probed in Sec.~\ref{sec:probe}). Hence the memory
+is a \emph{soft} summarizer; the window owns sharp local retrieval.
+
+% ============================================================
+\section{Experimental Setup}
+Four 340M models share one recipe (10B FineWeb-Edu tokens; hidden 1024, 24 layers,
+16/4 heads, window 512; training context 2048): \textbf{SWA}, \textbf{GMSWA-v2},
+\textbf{GMSWA-v3}, \textbf{full-attention Transformer}. Same-recipe Gated DeltaNet
+(${\sim}336$M), GLA, and Mamba-2 baselines are \pending. Metrics: loss-vs-position,
+NIAH/RULER single-needle recall, and a training-free capacity probe.
+
+% ============================================================
+\section{Results}
+\subsection{Decoding Correctness Fix}
+A \texttt{use\_cache} multi-token-prefill cache-alignment bug (deep-layer K/V corruption)
+was fixed; post-fix prefill/decode cosine $=1.0$, step-decode bit-exact. All numbers below are post-fix.
+
+\subsection{Loss vs.\ Token Position (Headline)}
+\begin{table}[H]\centering
+\caption{Next-token loss by position band (lower is better). Last two bands are beyond the
+2048 training length (extrapolation). Best constant-memory model per row in \textbf{bold}.}
+\label{tab:loss}
+\begin{tabular}{lcccc}
+\toprule
+Position band & SWA & GMSWA-v2 & GMSWA-v3 & Transformer \\
+\midrule
+0--512            & 3.99 & 3.98 & \textbf{3.91} & 3.97 \\
+512--1024         & 3.73 & 3.68 & \textbf{3.63} & 3.59 \\
+1024--2048        & 3.87 & 3.81 & \textbf{3.75} & 3.62 \\
+2048--4096 (ext.) & 4.14 & 4.07 & \textbf{3.99} & 5.74 \\
+4096--8192 (ext.) & 4.21 & 4.14 & \textbf{4.04} & 7.21 \\
+\bottomrule
+\end{tabular}
+\end{table}
+GMSWA-v3 beats SWA at every position, margin growing with distance (memory uses far context).
+Beyond 2048, full attention collapses (5.74, 7.21) while GMSWA-v3 leads all four (3.99, 4.04).
+
+\subsection{Single-Needle Retrieval (NIAH/RULER) --- Honest}
+\begin{table}[H]\centering
+\caption{Single-needle exact-match recall vs.\ context length (340M).}
+\label{tab:niah}
+\begin{tabular}{lccc}
+\toprule
+Context & SWA & GMSWA-v3 & Transformer \\
+\midrule
+512  & 1.00 & 1.00 & --- \\
+1024 & 0.64 & 0.64 & 0.86 \\
+2048 & 0.28 & 0.28 & 0.74 \\
+4096 (ext.) & --- & 0.17 & 0.00 \\
+8192 (ext.) & --- & 0.09 & 0.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+At 340M, GMSWA-v3 $\approx$ SWA on discrete recall: soft utilization, not discrete copy.
+Discrete recall is scale-emergent; a 340M tie is expected. Discrete-recall win predicted at 1B (\pending).
+
+\subsection{Ablations}
+v3${<}$v2 and GMSWA${<}$SWA at every position (Table~\ref{tab:loss}) are established.
+Same-recipe Gated DeltaNet, evicted-only vs.\ memory-on-all (\texttt{mem\_evicted\_only}),
+and GLA/Mamba-2 are \pending.
+
+\subsection{1B Recall Experiment \pending}
+\begin{table}[H]\centering
+\caption{\pending\ 1B single-needle recall (predicted GMSWA discrete-recall win).}
+\begin{tabular}{lccc}
+\toprule
+Context & SWA-1B & GMSWA-v3-1B & Transformer-1B \\
+\midrule
+1024 & \pending & \pending & \pending \\
+2048 & \pending & \pending & \pending \\
+4096 & \pending & \pending & \pending \\
+8192 & \pending & \pending & \pending \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Mechanism Capacity Probe}\label{sec:probe}
+Training-free: store $D$ key$\rightarrow$token associations at fixed state, query, decode,
+measure exact-token recall vs.\ $D$. Bilinear (linear/delta) hits a rank wall ($O(D^2)$ for
+$D$ associations); a hash/sketch store escapes it ($O(D)$), advantage growing under load.
+The capacity-winning hash store is \emph{not} reliably trainable (hard/soft addressing),
+so it is used as a diagnostic, not the deployed mechanism. Canonical values \pending\ (clean
+re-run from \texttt{mech\_capacity.py} for camera-ready).
+
+% ============================================================
+\section{Analysis and Discussion}
+\subsection{Recall--Memory Frontier}
+Memory budget vs.\ discrete-recall capacity: bilinear stores sit below a rank-wall ceiling,
+sketch stores raise it but are untrainable, an exact window is perfect within its span and
+zero beyond. GMSWA composes both regimes; the frontier predicts scale-dependent sharpening
+of soft utilization into discrete recall.
+\subsection{Why Extrapolation Works}
+Window sees only in-distribution offsets ($\le W$); memory retrieves by content (NoPE),
+independent of rotary phase --- so GMSWA degrades gracefully where rotary attention breaks.
+\subsection{Honest Scale Caveat}
+At 340M: real, measured soft-utilization win; \emph{no} discrete-recall claim. Discrete recall
+is the explicit 1B \pending\ test.
+
+% ============================================================
+\section{Acknowledged Limitations}
+Discrete recall is a tie at 340M; key baselines (\pending); efficiency wall-clock (\pending);
+hash probe is diagnostic-only; single corpus/scale family; all citations require
+DOI/arXiv verification before submission.
+
+% ============================================================
+\section{Conclusion and Future Work}
+GMSWA: constant-memory exact window $+$ complementary content-retrieving gated-delta-rule
+memory on evicted tokens. Lowest loss at every position among constant-memory models
+(margin grows with distance), best-of-all beyond training length where rotary attention
+collapses, at sequence-length-independent state. Honest soft-vs-discrete caveat at 340M,
+explained by a rank-wall/frontier analysis. Future: 1B discrete-recall run; same-recipe
+GDN/GLA/Mamba-2 baselines; evicted-only ablation; frontier sweep; fused-kernel efficiency.
+
+% ============================================================
+\section*{AI Disclosure}
+Draft prepared with AI assistance (Claude Code) using the \texttt{academic-research-skills}
+\texttt{academic-paper} methodology for structure/drafting/quality checks. All numerical
+results are authors' real measurements; the tool generated no numbers. Citations require
+author DOI/arXiv verification before submission. Adapt wording to AAAI's current AI-use policy.
+
+\section*{Data Availability}
+FineWeb-Edu (public). Configs, training/eval scripts, and logs released on publication.
+
+\section*{Ethics Statement}
+Architecture study on a public educational corpus; no human subjects or sensitive data.
+
+\section*{Author Contributions (CRediT)}
+[Complete per author before submission.]
+
+\section*{Acknowledgments}
+[Funding, compute, collaborators, reviewers.]
+
+% ============================================================
+% IRON RULE: every citation must be DOI/arXiv-verified before submission.
+\bibliography{references}
+\end{document}

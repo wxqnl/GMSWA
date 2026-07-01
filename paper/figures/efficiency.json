@@ -1,0 +1,150 @@
+{
+  "Transformer": {
+    "1024": {
+      "decode_ms": 14.57,
+      "mem_gb": 1.006,
+      "prefill_ktok_s": 45.2
+    },
+    "2048": {
+      "decode_ms": 14.56,
+      "mem_gb": 1.107,
+      "prefill_ktok_s": 130.1
+    },
+    "4096": {
+      "decode_ms": 14.61,
+      "mem_gb": 1.308,
+      "prefill_ktok_s": 179.7
+    },
+    "8192": {
+      "decode_ms": 14.67,
+      "mem_gb": 1.711,
+      "prefill_ktok_s": 271.6
+    },
+    "32768": {
+      "decode_ms": 60.22,
+      "mem_gb": 4.152,
+      "prefill_ktok_s": 105.9
+    },
+    "65536": {
+      "decode_ms": 105.38,
+      "mem_gb": 7.473,
+      "prefill_ktok_s": 57.1
+    },
+    "131072": {
+      "decode_ms": 122.31,
+      "mem_gb": 14.115,
+      "prefill_ktok_s": 39.0
+    }
+  },
+  "SWA": {
+    "1024": {
+      "decode_ms": 15.93,
+      "mem_gb": 0.853,
+      "prefill_ktok_s": 43.7
+    },
+    "2048": {
+      "decode_ms": 15.8,
+      "mem_gb": 0.89,
+      "prefill_ktok_s": 84.0
+    },
+    "4096": {
+      "decode_ms": 15.95,
+      "mem_gb": 0.967,
+      "prefill_ktok_s": 197.4
+    },
+    "8192": {
+      "decode_ms": 15.97,
+      "mem_gb": 1.118,
+      "prefill_ktok_s": 381.8
+    },
+    "32768": {
+      "decode_ms": 61.39,
+      "mem_gb": 0.877,
+      "prefill_ktok_s": 167.1
+    },
+    "65536": {
+      "decode_ms": 116.18,
+      "mem_gb": 0.965,
+      "prefill_ktok_s": 83.5
+    },
+    "131072": {
+      "decode_ms": 107.36,
+      "mem_gb": 1.166,
+      "prefill_ktok_s": 94.4
+    }
+  },
+  "GDN": {
+    "1024": {
+      "decode_ms": 20.03,
+      "mem_gb": 0.713,
+      "prefill_ktok_s": 22.6
+    },
+    "2048": {
+      "decode_ms": 19.96,
+      "mem_gb": 0.713,
+      "prefill_ktok_s": 51.3
+    },
+    "4096": {
+      "decode_ms": 19.97,
+      "mem_gb": 0.713,
+      "prefill_ktok_s": 92.0
+    },
+    "8192": {
+      "decode_ms": 20.19,
+      "mem_gb": 0.713,
+      "prefill_ktok_s": 180.3
+    },
+    "32768": {
+      "decode_ms": 31.86,
+      "mem_gb": 0.713,
+      "prefill_ktok_s": 134.4
+    },
+    "65536": {
+      "decode_ms": 26.4,
+      "mem_gb": 0.713,
+      "prefill_ktok_s": 138.3
+    },
+    "131072": {
+      "decode_ms": 20.15,
+      "mem_gb": 0.713,
+      "prefill_ktok_s": 219.4
+    }
+  },
+  "GMSWA": {
+    "1024": {
+      "decode_ms": 34.64,
+      "mem_gb": 0.945,
+      "prefill_ktok_s": 17.5
+    },
+    "2048": {
+      "decode_ms": 34.52,
+      "mem_gb": 0.995,
+      "prefill_ktok_s": 35.6
+    },
+    "4096": {
+      "decode_ms": 34.36,
+      "mem_gb": 1.096,
+      "prefill_ktok_s": 71.0
+    },
+    "8192": {
+      "decode_ms": 34.54,
+      "mem_gb": 1.297,
+      "prefill_ktok_s": 134.0
+    },
+    "32768": {
+      "decode_ms": 41.87,
+      "mem_gb": 0.96,
+      "prefill_ktok_s": 36.4
+    },
+    "65536": {
+      "decode_ms": 34.53,
+      "mem_gb": 1.044,
+      "prefill_ktok_s": 33.8
+    },
+    "131072": {
+      "decode_ms": 34.51,
+      "mem_gb": 1.245,
+      "prefill_ktok_s": 32.0
+    }
+  }
+}

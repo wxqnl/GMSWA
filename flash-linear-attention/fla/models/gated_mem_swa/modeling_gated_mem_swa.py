@@ -11,6 +11,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
+from fla.layers.attn import Attention
 from fla.layers.gated_mem_swa import GatedMemSWA
 from fla.models.gated_mem_swa.configuration_gated_mem_swa import GatedMemSWAConfig
 from fla.models.utils import Cache, FLAGenerationMixin
@@ -38,30 +39,44 @@ class GatedMemSWABlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.attn = GatedMemSWA(
-            dim=config.hidden_size,
-            num_heads=config.num_heads,
-            num_kv_heads=config.num_kv_heads,
-            qkv_bias=config.qkv_bias,
-            window_size=config.window_size,
-            rope_theta=config.rope_theta,
-            max_position_embeddings=config.max_position_embeddings,
-            num_memory_components=getattr(config, "num_memory_components", getattr(config, "num_mem_slots", 1)),
-            use_memory_component=getattr(config, "use_memory_component", None),
-            memory_state_rank=getattr(config, "memory_state_rank", None),
-            mem_scale=config.mem_scale,
-            mem_rank=getattr(config, "mem_rank", None),
-            mem_proj_mode=getattr(config, "mem_proj_mode", "linear"),
-            mem_gate_mode=getattr(config, "mem_gate_mode", "linear"),
-            mem_update_source=getattr(config, "mem_update_source", "kv"),
-            mem_update_stride=getattr(config, "mem_update_stride", 1),
-            mem_token_threshold=getattr(config, "mem_token_threshold", None),
-            disable_memory=getattr(config, "disable_memory", False),
-            gate_bias_init=config.gate_bias_init,
-            mem_norm=config.mem_norm,
-            mem_norm_eps=config.mem_norm_eps,
-            layer_idx=layer_idx,
-        )
+        if config.attn is not None and layer_idx in config.attn["layers"]:
+            self.attn = Attention(
+                hidden_size=config.hidden_size,
+                num_heads=config.attn["num_heads"],
+                num_kv_heads=config.attn["num_kv_heads"],
+                qkv_bias=config.attn["qkv_bias"],
+                qk_norm=config.attn["qk_norm"],
+                window_size=config.attn["window_size"],
+                rope_theta=config.attn["rope_theta"],
+                max_position_embeddings=config.max_position_embeddings,
+                layer_idx=layer_idx,
+            )
+        else:
+            self.attn = GatedMemSWA(
+                dim=config.hidden_size,
+                num_heads=config.num_heads,
+                num_kv_heads=config.num_kv_heads,
+                qkv_bias=config.qkv_bias,
+                window_size=config.window_size,
+                rope_theta=config.rope_theta,
+                max_position_embeddings=config.max_position_embeddings,
+                disable_memory=config.disable_memory,
+                disable_local=getattr(config, "disable_local", False),
+                mem_separate_proj=config.mem_separate_proj,
+                mem_evicted_only=config.mem_evicted_only,
+                mem_use_short_conv=getattr(config, "mem_use_short_conv", False),
+                mem_conv_size=getattr(config, "mem_conv_size", 4),
+                mem_use_output_norm=getattr(config, "mem_use_output_norm", False),
+                mem_swa_drop_prob=getattr(config, "mem_swa_drop_prob", 0.0),
+                mem_gate_logit_bias=config.mem_gate_logit_bias,
+                mix_gate_logit_bias=config.mix_gate_logit_bias,
+                a_log_init_lo=config.a_log_init_lo,
+                a_log_init_hi=config.a_log_init_hi,
+                dt_min=config.dt_min,
+                dt_max=config.dt_max,
+                dt_init_floor=config.dt_init_floor,
+                layer_idx=layer_idx,
+            )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = GatedMemSWAMLP(
@@ -122,7 +137,14 @@ class GatedMemSWAPreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = False,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
+        # GM-SWA memory params (A_log / dt_bias / fused gate bias) must be
+        # initialized with whole-tensor ops so they survive FSDP's DTensor
+        # sharding. `reset_parameters` (view + row-select) only works on plain
+        # tensors and is kept for the non-distributed path (layer __init__).
+        if isinstance(module, GatedMemSWA) and next(module.parameters()).device.type != "meta":
+            if module.memory_enabled:
+                self._init_gmswa_memory_params(module)
+        elif isinstance(module, (nn.Linear, nn.Conv1d)):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
@@ -142,6 +164,39 @@ class GatedMemSWAPreTrainedModel(PreTrainedModel):
                 with torch.no_grad():
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
+    @torch.no_grad()
+    def _init_gmswa_memory_params(self, module: "GatedMemSWA") -> None:
+        """DTensor-safe init for the v2 memory branch (A_log / dt_bias / fused gate bias).
+
+        Uses only whole-tensor ops (uniform_/clamp/log/copy_) and `distribute_tensor`
+        so it works whether the params are plain tensors (tests) or FSDP DTensors.
+        """
+        H = module.num_heads
+        # Fused gate projection: weight ~ N(0, 0.02); bias laid out as
+        # [beta(=mem_gate_bias) | a(=0) | mix(=mix_gate_bias)] over 3*H entries.
+        nn.init.normal_(module.gate_proj.weight, mean=0.0, std=0.02)
+        bias = module.gate_proj.bias
+        full = torch.empty(3 * H, dtype=bias.dtype, device=bias.device)
+        full[:H].fill_(module.mem_gate_logit_bias)
+        full[H:2 * H].zero_()
+        full[2 * H:].fill_(module.mix_gate_logit_bias)
+        try:
+            from torch.distributed.tensor import DTensor, distribute_tensor
+        except Exception:
+            DTensor = None
+        if DTensor is not None and isinstance(bias, DTensor):
+            bias.copy_(distribute_tensor(full, bias.device_mesh, bias.placements))
+        else:
+            bias.copy_(full)
+
+        # Mamba-2 style decay params.
+        nn.init.uniform_(module.A_log, a=math.log(module.a_log_init_lo), b=math.log(module.a_log_init_hi))
+        module.A_log._no_weight_decay = True
+        nn.init.uniform_(module.dt_bias, a=module.dt_min, b=module.dt_max)
+        dt = module.dt_bias.clamp(min=module.dt_init_floor)
+        module.dt_bias.copy_(torch.log(torch.expm1(dt)))  # inverse softplus
+        module.dt_bias._no_weight_decay = True
+
 
 class GatedMemSWAModel(GatedMemSWAPreTrainedModel):
 
@@ -155,6 +210,15 @@ class GatedMemSWAModel(GatedMemSWAPreTrainedModel):
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
+
+        # Memory-first curriculum: anneal the SWA-drop prob from its start value to
+        # 0 over the first `mem_swa_drop_anneal_steps` training forwards, so the
+        # recurrent memory is forced to learn sharp recall alone early, then the
+        # hybrid converges normally. Counter lives here (outside the checkpointed
+        # block) so activation-checkpoint recompute stays consistent.
+        self._mem_drop_p0 = float(getattr(config, "mem_swa_drop_prob", 0.0))
+        self._mem_drop_anneal = int(getattr(config, "mem_swa_drop_anneal_steps", 0))
+        self._mem_drop_step = 0
 
         self.post_init()
 
@@ -201,6 +265,14 @@ class GatedMemSWAModel(GatedMemSWAPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
+
+        # memory-first curriculum: set this step's annealed SWA-drop prob on each layer
+        if self.training and self._mem_drop_anneal > 0:
+            eff_p = self._mem_drop_p0 * max(0.0, 1.0 - self._mem_drop_step / self._mem_drop_anneal)
+            for _l in self.layers:
+                if hasattr(_l.attn, "_runtime_drop_p"):
+                    _l.attn._runtime_drop_p = eff_p
+            self._mem_drop_step += 1
 
         for layer in self.layers:
             if output_hidden_states:
